@@ -6,6 +6,7 @@ import MainLayout from './layouts/MainLayout';
 import AuthLayout from './layouts/AuthLayout';
 import LoginPage from './pages/auth/LoginPage';
 import AdminDashboard from './pages/admin/AdminDashboard';
+import UsersPage from './pages/admin/UsersPage';
 import MachinesPage from './pages/admin/MachinesPage';
 import DocumentsPage from './pages/admin/DocumentsPage';
 import ProductsPage from './pages/admin/ProductsPage';
@@ -64,6 +65,14 @@ export default function App() {
               element={
                 <ProtectedRoute allowedRoles={['admin']}>
                   <AdminDashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin/users"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <UsersPage />
                 </ProtectedRoute>
               }
             />

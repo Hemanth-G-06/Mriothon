@@ -5,6 +5,7 @@ export const USER_ROLES = {
 };
 
 export const DOCUMENT_STATUSES = {
+  READY: 'READY',
   UPLOADED: 'Uploaded',
   PROCESSING: 'Processing',
   INDEXED: 'Indexed',
@@ -27,4 +28,4 @@ export const ANSWER_STATUSES = {
 };
 
 export const INSUFFICIENT_EVIDENCE_MESSAGE =
-  "I couldn't find sufficient information in the selected machine's manuals to answer this question. Please check the available manuals or contact your supervisor.";
+  "The available manual passages do not contain enough information to answer this question.";

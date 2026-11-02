@@ -38,7 +38,7 @@ export default function MachineSelector({
             <option value="">-- Choose Machine --</option>
             {machines.map((machine) => (
               <option key={machine.id} value={machine.id}>
-                {machine.name} ({machine.model_number || 'Standard'})
+                {machine.name} ({machine.machine_code || machine.model_number || 'Standard'})
               </option>
             ))}
           </select>

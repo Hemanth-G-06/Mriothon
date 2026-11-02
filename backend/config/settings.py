@@ -32,8 +32,10 @@ SECRET_KEY = os.getenv(
 DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 't', 'yes')
 
 # Allowed hosts configuration
-raw_allowed_hosts = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost')
+raw_allowed_hosts = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,testserver')
 ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+if 'testserver' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('testserver')
 
 
 # ==============================================================================
@@ -106,39 +108,67 @@ AUTH_USER_MODEL = 'accounts.User'
 
 
 # ==============================================================================
-# Database Configuration (PostgreSQL 18 Required)
+# Database Configuration (Neon PostgreSQL / PostgreSQL 18)
 # ==============================================================================
 
-DB_NAME = os.getenv('DB_NAME', 'manufacturing_manual_assistant')
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', '')
-DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
-DB_PORT = os.getenv('DB_PORT', '5432')
+DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': DB_NAME,
-        'USER': DB_USER,
-        'PASSWORD': DB_PASSWORD,
-        'HOST': DB_HOST,
-        'PORT': int(DB_PORT) if DB_PORT else 5432,
-    }
-}
+if DATABASE_URL:
+    # Primary configuration method: parse DATABASE_URL via psycopg conninfo
+    from psycopg.conninfo import conninfo_to_dict
 
-if os.getenv('USE_SQLITE', 'False').lower() in ('true', '1', 'yes'):
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    conn_params = conninfo_to_dict(DATABASE_URL)
+    standard_keys = {'dbname', 'user', 'password', 'host', 'port'}
+    db_options = {k: v for k, v in conn_params.items() if k not in standard_keys}
+
+    # Enforce SSL requirement for Neon connectivity
+    if 'sslmode' not in db_options:
+        db_options['sslmode'] = 'require'
+
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': conn_params.get('dbname', ''),
+            'USER': conn_params.get('user', ''),
+            'PASSWORD': conn_params.get('password', ''),
+            'HOST': conn_params.get('host', ''),
+            'PORT': int(conn_params.get('port', 5432)) if conn_params.get('port') else 5432,
+            'OPTIONS': db_options,
+            'CONN_HEALTH_CHECKS': True,
+        }
+    }
+else:
+    # Fallback configuration method: discrete environment parameters
+    DB_NAME = os.getenv('DB_NAME', 'manufacturing_manual_assistant')
+    DB_USER = os.getenv('DB_USER', 'postgres')
+    DB_PASSWORD = os.getenv('DB_PASSWORD', '')
+    DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
+    DB_PORT = os.getenv('DB_PORT', '5432')
+    DB_SSLMODE = os.getenv('DB_SSLMODE', '')
+
+    db_options = {}
+    if DB_SSLMODE:
+        db_options['sslmode'] = DB_SSLMODE
+
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': DB_NAME,
+            'USER': DB_USER,
+            'PASSWORD': DB_PASSWORD,
+            'HOST': DB_HOST,
+            'PORT': int(DB_PORT) if DB_PORT else 5432,
+            'OPTIONS': db_options,
+            'CONN_HEALTH_CHECKS': True,
+        }
     }
 
-# Automated test runner database isolation:
-# Uses in-memory SQLite for test execution unless USE_POSTGRES_TEST_DB is set.
-if 'test' in sys.argv and not os.getenv('USE_POSTGRES_TEST_DB', '').lower() in ('true', '1', 'yes'):
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
-    }
+# ==============================================================================
+# Mandatory PostgreSQL Enforcement
+# SQLite is strictly prohibited for production, development, and testing.
+# ==============================================================================
+if DATABASES['default'].get('ENGINE') != 'django.db.backends.postgresql':
+    raise RuntimeError('PostgreSQL is mandatory. SQLite is strictly prohibited.')
 
 
 # ==============================================================================
@@ -186,6 +216,9 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Configurable maximum file upload size (default 25 MB)
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv('MAX_UPLOAD_SIZE_BYTES', str(25 * 1024 * 1024)))
 
 
 # ==============================================================================
@@ -254,3 +287,68 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+CORS_EXPOSE_HEADERS = [
+    'Content-Type',
+    'Content-Disposition',
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+]
+
+
+# ==============================================================================
+# RAG, Embedding Provider & ChromaDB Configuration
+# ==============================================================================
+
+# Embedding Provider Selection ('huggingface' or 'lm_studio')
+EMBEDDING_PROVIDER = os.getenv('EMBEDDING_PROVIDER', 'huggingface').lower().strip()
+
+# Hugging Face Inference Providers Configuration
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Qwen/Qwen3-Embedding-0.6B').strip()
+EMBEDDING_API_KEY = os.getenv('EMBEDDING_API_KEY') or os.getenv('HF_TOKEN', '')
+EMBEDDING_BASE_URL = os.getenv('EMBEDDING_BASE_URL', '').strip()
+
+# LM Studio Local Provider Configuration
+LM_STUDIO_BASE_URL = os.getenv('LM_STUDIO_BASE_URL', 'http://127.0.0.1:1234/v1').strip()
+LM_STUDIO_EMBEDDING_MODEL = os.getenv('LM_STUDIO_EMBEDDING_MODEL', 'nomic-ai/nomic-embed-text-v1.5-GGUF').strip()
+
+# General Embedding Settings
+EMBEDDING_REQUEST_TIMEOUT = int(os.getenv('EMBEDDING_REQUEST_TIMEOUT', '30'))
+
+# ChromaDB Vector Database Configuration
+CHROMA_PERSIST_DIRECTORY = Path(os.getenv('CHROMA_PERSIST_DIRECTORY', str(BASE_DIR / 'data' / 'chroma')))
+CHROMA_COLLECTION_NAME = os.getenv('CHROMA_COLLECTION_NAME', 'manufacturing_manual_chunks_v1').strip()
+
+# Vector Backend Selection -- controls whether retrieval uses ChromaDB or pgvector.
+# Switch to 'pgvector' only after: migration applied, embeddings rebuilt, and full test suite passes.
+VECTOR_BACKEND = os.getenv('VECTOR_BACKEND', 'pgvector').lower().strip()
+if VECTOR_BACKEND not in ('chroma', 'pgvector'):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        f"VECTOR_BACKEND must be 'chroma' or 'pgvector', got: {VECTOR_BACKEND!r}"
+    )
+
+# Document Chunking Configuration
+CHUNK_TARGET_TOKENS = int(os.getenv('CHUNK_TARGET_TOKENS', '400'))
+CHUNK_MAX_TOKENS = int(os.getenv('CHUNK_MAX_TOKENS', '500'))
+CHUNK_OVERLAP_TOKENS = int(os.getenv('CHUNK_OVERLAP_TOKENS', '60'))
+CHUNK_MIN_TOKENS = int(os.getenv('CHUNK_MIN_TOKENS', '40'))
+
+# RAG Semantic Retrieval Configuration
+RAG_TOP_K = int(os.getenv('RAG_TOP_K', '5'))
+
+# LLM Answer Generation Configuration ('gemini', 'openai_compatible', 'lm_studio')
+# Google Gemini API is the mandatory default API provider.
+LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'gemini').lower().strip()
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite-preview').strip()
+
+# Common Provider Settings
+LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', '60'))
+LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.1'))
+
+# Secondary / Self-hosted Fallback Options (never used implicitly when Gemini fails)
+LLM_MODEL = os.getenv('LLM_MODEL', 'gemini-2.5-flash').strip()
+LLM_BASE_URL = os.getenv('LLM_BASE_URL', '').strip()
+LLM_API_KEY = os.getenv('LLM_API_KEY', '').strip()

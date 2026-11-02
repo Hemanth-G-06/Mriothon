@@ -204,6 +204,7 @@ class UserAdminCreateSerializer(serializers.ModelSerializer):
         default=UserRole.ENGINEER,
         required=False,
     )
+    is_active = serializers.BooleanField(default=True, required=False)
 
     class Meta:
         model = User

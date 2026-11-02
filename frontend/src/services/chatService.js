@@ -6,31 +6,44 @@ let mockChatState = [...INITIAL_MOCK_CHAT_HISTORY];
 
 export const chatService = {
   /**
-   * Ask question for a selected machine
-   * @param {number|string} machineId
+   * Ask question for a selected machine using the real Gemini-backed RAG API
+   * @param {string|number} machineId
    * @param {string} question
    */
   async askQuestion(machineId, question) {
     try {
       let response;
       try {
-        // Primary endpoint matching backend config/urls.py (api/rag/)
-        response = await apiClient.post('/rag/ask/', {
+        // Primary backend endpoint: POST /api/rag/query/
+        response = await apiClient.post('/rag/query/', {
           machine_id: machineId,
-          question: question
+          question: question.trim()
         });
-      } catch (err404) {
-        if (err404.response && (err404.response.status === 404 || err404.response.status === 405)) {
-          // Secondary endpoint alias
-          response = await apiClient.post('/chat/ask/', {
+      } catch (errFallback) {
+        if (errFallback.response && (errFallback.response.status === 404 || errFallback.response.status === 405)) {
+          // Secondary endpoint alias: POST /api/rag/ask/
+          response = await apiClient.post('/rag/ask/', {
             machine_id: machineId,
-            question: question
+            question: question.trim()
           });
         } else {
-          throw err404;
+          throw errFallback;
         }
       }
-      return response.data;
+
+      const data = response.data;
+      const isAbstained = Boolean(data.abstained || data.is_insufficient_evidence);
+
+      return {
+        id: data.query_id || data.id || ('q-' + Date.now()),
+        machine_id: machineId,
+        question: question.trim(),
+        answer: data.answer || (isAbstained ? INSUFFICIENT_EVIDENCE_MESSAGE : ''),
+        citations: Array.isArray(data.citations) ? data.citations : [],
+        abstained: isAbstained,
+        is_insufficient_evidence: isAbstained,
+        created_at: data.created_at || new Date().toISOString()
+      };
     } catch (err) {
       const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
       if (USE_MOCK_FALLBACK && isNetworkError) {
@@ -43,38 +56,16 @@ export const chatService = {
         let citations = [];
 
         if (qLower.includes('warm') || qLower.includes('spindle') || qLower.includes('rpm')) {
-          answer = `**HP-200 High-Speed Warm-up Protocol:**\n\n1. Ensure axis interlocks are cleared and coolant chiller temperature is stabilized at **22°C - 25°C**.\n2. In MDI mode, command program **O9001**.\n3. Cycle through stage 1: **3,000 RPM for 10 minutes**.\n4. Ramp to stage 2: **6,000 RPM for 5 minutes**.\n5. Verify lubrication pressure indicator is steady in the green zone before commencing cutting operations.`;
+          answer = `**High-Speed Warm-up Protocol:**\n\n1. Ensure axis interlocks are cleared and coolant chiller temperature is stabilized at **22°C - 25°C**.\n2. In MDI mode, command program **O9001**.\n3. Cycle through stage 1: **3,000 RPM for 10 minutes**.\n4. Ramp to stage 2: **6,000 RPM for 5 minutes**.\n5. Verify lubrication pressure indicator is steady in the green zone before commencing cutting operations.`;
           citations = [
             {
               id: 'c-mock-1',
               document_id: 101,
-              document_title: 'HP-200 Operations Manual',
+              document_title: 'Operations Manual',
               revision: 'Rev 2.4',
               page_number: 34,
               snippet: 'Section 4.2 Spindle Warm-up Cycle: Cold starts without executing O9001 warmup may cause ceramic bearing micro-fractures.',
-              pdf_url: null
-            },
-            {
-              id: 'c-mock-2',
-              document_id: 102,
-              document_title: 'HP-200 Maintenance Manual',
-              revision: 'Rev 1.8',
-              page_number: 89,
-              snippet: 'Cooling lubrication reservoir operating range: 22°C - 25°C under continuous duty.',
-              pdf_url: null
-            }
-          ];
-        } else if (qLower.includes('pressure') || qLower.includes('shutoff') || qLower.includes('emergency') || qLower.includes('leak')) {
-          answer = `**AC-90 Compressor Pressure Protection:**\n\nThe dual-stage differential sensor automatically triggers an emergency interlock cutoff at **14.5 bar (210 PSI)**.\n\n- If discharge pressure exceeds **15.0 bar**, the mechanical pop-off safety valve releases immediately.\n- If differential oil pressure drops below **1.2 bar** for > 15 seconds, system logs fault **E-302** and powers down compressor drive coils.`;
-          citations = [
-            {
-              id: 'c-mock-3',
-              document_id: 103,
-              document_title: 'AC-90 Operations and Maintenance Manual',
-              revision: 'Rev 3.1',
-              page_number: 48,
-              snippet: 'Automatic Interlock Shutoff: Dual-stage pressure sensor calibrated for 14.5 bar hard-trip limit.',
-              pdf_url: null
+              source_id: 'DOC-MOCK-P34-C0'
             }
           ];
         } else {
@@ -84,12 +75,13 @@ export const chatService = {
         }
 
         const newRecord = {
-          id: Date.now(),
-          machine_id: Number(machineId),
+          id: 'mock-' + Date.now(),
+          machine_id: machineId,
           machine_name: 'Selected Machine',
           engineer_name: 'Current Engineer',
           question,
           answer,
+          abstained: isInsufficient,
           is_insufficient_evidence: isInsufficient,
           citations,
           created_at: new Date().toISOString()
@@ -98,32 +90,48 @@ export const chatService = {
         mockChatState = [newRecord, ...mockChatState];
         return newRecord;
       }
-      throw err;
+
+      // Propagate real error message
+      let errorMsg = 'Failed to submit question to technical assistant.';
+      if (err.response?.data) {
+        const d = err.response.data;
+        errorMsg = d.detail || d.error || (typeof d === 'string' ? d : JSON.stringify(d));
+      } else if (err.message) {
+        errorMsg = err.message;
+      }
+      const customErr = new Error(errorMsg);
+      customErr.response = err.response;
+      customErr.code = err.code;
+      throw customErr;
     }
   },
 
   /**
-   * Fetch previous questions and answers for a specific machine or all
+   * Fetch previous questions and answers for a specific machine or user
    * @param {number|string} machineId
    */
   async getChatHistory(machineId = null) {
     try {
       const params = machineId ? { machine_id: machineId } : {};
-      let response;
-      try {
-        // Backend config/urls.py maps api/history/
-        response = await apiClient.get('/history/', { params });
-      } catch (err404) {
-        if (err404.response && (err404.response.status === 404 || err404.response.status === 405)) {
-          response = await apiClient.get('/chat/history/', { params });
-        } else {
-          throw err404;
-        }
-      }
+      const response = await apiClient.get('/history/', { params });
       const data = response.data;
-      if (Array.isArray(data)) return data;
-      if (data && Array.isArray(data.results)) return data.results;
-      return [];
+      const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.results) ? data.results : []);
+
+      return rawList.map((item) => {
+        const isAbstained = Boolean(item.abstained || item.is_insufficient_evidence);
+        return {
+          id: item.id,
+          machine_id: item.machine_id || item.machine,
+          machine_name: item.machine_name || '',
+          machine_code: item.machine_code || '',
+          question: item.question,
+          answer: item.answer || (isAbstained ? INSUFFICIENT_EVIDENCE_MESSAGE : ''),
+          citations: Array.isArray(item.citations) ? item.citations : [],
+          abstained: isAbstained,
+          is_insufficient_evidence: isAbstained,
+          created_at: item.created_at
+        };
+      });
     } catch (err) {
       const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
       if (USE_MOCK_FALLBACK && isNetworkError) {
@@ -141,17 +149,14 @@ export const chatService = {
    */
   async getChatRecordById(id) {
     try {
-      let response;
-      try {
-        response = await apiClient.get(`/history/${id}/`);
-      } catch (err404) {
-        if (err404.response && (err404.response.status === 404 || err404.response.status === 405)) {
-          response = await apiClient.get(`/chat/history/${id}/`);
-        } else {
-          throw err404;
-        }
-      }
-      return response.data;
+      const response = await apiClient.get(`/history/${id}/`);
+      const item = response.data;
+      const isAbstained = Boolean(item.abstained || item.is_insufficient_evidence);
+      return {
+        ...item,
+        abstained: isAbstained,
+        is_insufficient_evidence: isAbstained
+      };
     } catch (err) {
       const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
       if (USE_MOCK_FALLBACK && isNetworkError) {

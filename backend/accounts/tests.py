@@ -252,6 +252,29 @@ class AuthenticationAPITestCase(TestCase):
         self.assertNotIn('username', data)
         self.assertNotIn('password', data)
 
+    def test_logout_endpoint_blacklists_refresh_token_and_is_idempotent(self):
+        login_res = self.client.post(
+            self.login_url,
+            {'email': 'engineer@factory.local', 'password': self.password},
+        )
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        refresh_token = login_res.json()['refresh']
+
+        # Logout with valid refresh token -> 200 OK
+        logout_res = self.client.post('/api/auth/logout/', {'refresh': refresh_token})
+        self.assertEqual(logout_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(logout_res.json().get('detail'), 'Successfully logged out.')
+
+        # Blacklisted refresh token must be rejected by /api/auth/refresh/
+        refresh_res = self.client.post(self.refresh_url, {'refresh': refresh_token})
+        self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Idempotent second logout or empty body must also succeed with 200 OK
+        repeat_res = self.client.post('/api/auth/logout/', {'refresh': refresh_token})
+        self.assertEqual(repeat_res.status_code, status.HTTP_200_OK)
+        empty_res = self.client.post('/api/auth/logout/', {})
+        self.assertEqual(empty_res.status_code, status.HTTP_200_OK)
+
     def test_current_user_profile_unauthenticated_rejected(self):
         response = self.client.get(self.me_url)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
