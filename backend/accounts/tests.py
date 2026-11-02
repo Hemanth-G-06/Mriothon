@@ -453,3 +453,11 @@ class SecurityAssuranceTestCase(TestCase):
         detail_str = response.content.decode()
         self.assertNotIn('pbkdf2_sha256', detail_str)
         self.assertNotIn('password', detail_str)
+
+    def test_logout_blacklists_token(self):
+        refresh = str(RefreshToken.for_user(self.admin))
+        logout_res = self.client.post('/api/auth/logout/', {'refresh': refresh})
+        self.assertEqual(logout_res.status_code, status.HTTP_200_OK)
+        # Verify blacklisted token cannot be refreshed
+        refresh_res = self.client.post('/api/auth/refresh/', {'refresh': refresh})
+        self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)

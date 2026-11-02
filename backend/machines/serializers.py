@@ -4,7 +4,14 @@ Serializers for Machine Management and Engineer Assignments.
 
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from machines.models import Machine
 
+
+class MachineSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Machine model supporting list, retrieve, and creation.
+    """
+    manuals_count = serializers.IntegerField(read_only=True)
 from accounts.models import UserRole
 from machines.models import Machine, MachineAssignment, MachineStatus
 
@@ -120,6 +127,16 @@ class MachineUpdateSerializer(serializers.ModelSerializer):
         model = Machine
         fields = [
             'id',
+            'name',
+            'model_number',
+            'serial_number',
+            'location',
+            'description',
+            'manuals_count',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'manuals_count']
             'machine_code',
             'name',
             'manufacturer',

@@ -2,6 +2,8 @@
 URL routing for the Documents application.
 """
 
+from rest_framework.routers import DefaultRouter
+from documents.views import DocumentViewSet
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
@@ -20,6 +22,7 @@ app_name = 'documents'
 router = DefaultRouter()
 router.register(r'', DocumentViewSet, basename='document')
 
+urlpatterns = router.urls
 urlpatterns = [
     path('<uuid:document_id>/pages/', DocumentPagesView.as_view(), name='document-pages'),
     path('<uuid:document_id>/download/', DocumentDownloadView.as_view(), name='document-download'),
