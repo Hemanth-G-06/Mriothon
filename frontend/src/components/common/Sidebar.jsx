@@ -1,6 +1,20 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Cpu, FileText, MessageSquare, History, X, Wrench, Shield, HardHat } from 'lucide-react';
+import {
+  LayoutDashboard,
+  Cpu,
+  FileText,
+  MessageSquare,
+  History,
+  X,
+  Wrench,
+  Shield,
+  HardHat,
+  Package,
+  Scan,
+  Layers,
+  ShieldCheck
+} from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
 export default function Sidebar({ isOpen, onClose }) {
@@ -12,15 +26,20 @@ export default function Sidebar({ isOpen, onClose }) {
         return [
           { to: '/admin', label: 'Admin Overview', icon: LayoutDashboard },
           { to: '/admin/machines', label: 'Registered Machines', icon: Cpu },
+          { to: '/admin/products', label: 'Product Registry', icon: Package },
           { to: '/admin/documents', label: 'Manuals & Upload', icon: FileText }
         ];
       case 'engineer':
         return [
-          { to: '/engineer', label: 'Manual Assistant', icon: MessageSquare }
+          { to: '/engineer', label: 'Manual Assistant', icon: MessageSquare },
+          { to: '/engineer/quality-inspection', label: 'Single Inspection', icon: Scan },
+          { to: '/engineer/batch-inspection', label: 'Batch Inspection', icon: Layers },
+          { to: '/engineer/inspection-history', label: 'Inspection History', icon: History }
         ];
       case 'supervisor':
         return [
-          { to: '/supervisor', label: 'Audit & History', icon: History }
+          { to: '/supervisor', label: 'Manual QA Audit', icon: History },
+          { to: '/supervisor/inspection-review', label: 'Inspection Review', icon: ShieldCheck }
         ];
       default:
         return [];

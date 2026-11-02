@@ -3,12 +3,135 @@ Serializers for authentication, profile management, and administrator user provi
 Email is the sole authentication and user identifier (username removed).
 """
 
+import re
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from accounts.models import User, UserRole
+
+GMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@gmail\.com$', re.IGNORECASE)
+SPECIAL_CHARACTERS = set(r"@#$%&!*^()_-+={}[]|;:'\",.<>/?\\~`")
+
+
+def validate_registration_password(password):
+    """
+    Validate registration password against strict criteria:
+    - Must contain at least 8 characters.
+    - The first character must be an uppercase English letter (A–Z).
+    - Must contain at least one lowercase letter (a–z).
+    - Must contain at least one number (0–9).
+    - Must contain at least one special character.
+    """
+    if not password:
+        raise serializers.ValidationError("Password is required.")
+    if len(password) < 8:
+        raise serializers.ValidationError("Password must contain at least 8 characters.")
+    if not ('A' <= password[0] <= 'Z'):
+        raise serializers.ValidationError("The first character must be an uppercase English letter (A–Z).")
+    if not any(c.islower() for c in password):
+        raise serializers.ValidationError("Password must contain at least one lowercase letter.")
+    if not any(c.isdigit() for c in password):
+        raise serializers.ValidationError("Password must contain at least one number.")
+    if not any(c in SPECIAL_CHARACTERS for c in password):
+        raise serializers.ValidationError("Password must contain at least one special character.")
+    return password
+
+
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    """
+    Public self-registration serializer for new operator/engineer accounts.
+    Enforces Gmail email verification, password complexity, confirmation match,
+    and assigns the default ENGINEER application role.
+    """
+    first_name = serializers.CharField(
+        max_length=150,
+        required=True,
+        allow_blank=False,
+        error_messages={'blank': 'First Name is required.'}
+    )
+    last_name = serializers.CharField(
+        max_length=150,
+        required=True,
+        allow_blank=False,
+        error_messages={'blank': 'Last Name is required.'}
+    )
+    email = serializers.EmailField(
+        max_length=255,
+        required=True,
+        allow_blank=False,
+        error_messages={'blank': 'Gmail address is required.'}
+    )
+    password = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+    )
+    password_confirm = serializers.CharField(
+        write_only=True,
+        required=True,
+        style={'input_type': 'password'},
+    )
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'first_name',
+            'last_name',
+            'email',
+            'password',
+            'password_confirm',
+        ]
+        read_only_fields = ['id']
+
+    def validate_first_name(self, value):
+        val = value.strip()
+        if not val:
+            raise serializers.ValidationError('First Name is required.')
+        return val
+
+    def validate_last_name(self, value):
+        val = value.strip()
+        if not val:
+            raise serializers.ValidationError('Last Name is required.')
+        return val
+
+    def validate_email(self, value):
+        val = value.strip().lower()
+        if not GMAIL_REGEX.match(val):
+            raise serializers.ValidationError('Please enter a valid Gmail address ending with @gmail.com.')
+        if User.objects.filter(email=val).exists():
+            raise serializers.ValidationError('A user with that email address already exists.')
+        return val
+
+    def validate_password(self, value):
+        return validate_registration_password(value)
+
+    def validate(self, attrs):
+        if attrs.get('password') != attrs.get('password_confirm'):
+            raise serializers.ValidationError({
+                'password_confirm': 'Confirm Password does not match the entered password.'
+            })
+        return attrs
+
+    def create(self, validated_data):
+        # Strip potential privilege escalation flags
+        validated_data.pop('password_confirm', None)
+        validated_data.pop('role', None)
+        validated_data.pop('is_staff', None)
+        validated_data.pop('is_superuser', None)
+
+        password = validated_data.pop('password')
+        user = User.objects.create_user(
+            email=validated_data['email'],
+            password=password,
+            first_name=validated_data['first_name'],
+            last_name=validated_data['last_name'],
+            role=UserRole.ENGINEER
+        )
+        return user
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):

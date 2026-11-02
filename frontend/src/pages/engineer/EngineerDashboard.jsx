@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { machineService } from '../../services/machineService';
 import { chatService } from '../../services/chatService';
 import MachineSelector from '../../components/chat/MachineSelector';
@@ -7,7 +8,7 @@ import ChatInput from '../../components/chat/ChatInput';
 import PdfViewerModal from '../../components/pdf/PdfViewerModal';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import EmptyState from '../../components/common/EmptyState';
-import { MessageSquare, AlertCircle, RefreshCw, History, Cpu } from 'lucide-react';
+import { MessageSquare, AlertCircle, RefreshCw, History, Cpu, Scan, Layers, Sparkles } from 'lucide-react';
 import { getErrorMessage } from '../../utils/errorHandler';
 
 export default function EngineerDashboard() {
@@ -160,6 +161,37 @@ export default function EngineerDashboard() {
 
   return (
     <div className="d-flex flex-column h-100" style={{ minHeight: 'calc(100vh - 120px)' }}>
+      {/* Visual Quality Inspection Quick Navigation Section */}
+      <div className="card card-industrial p-3 bg-white mb-3">
+        <div className="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+          <div className="d-flex align-items-center gap-3">
+            <div className="p-2 rounded bg-primary bg-opacity-10 text-primary">
+              <Scan size={22} />
+            </div>
+            <div>
+              <div className="d-flex align-items-center gap-2">
+                <h6 className="fw-bold text-dark mb-0">AI Visual Quality Inspection</h6>
+                <span className="badge bg-primary text-white" style={{ fontSize: '0.68rem' }}>MODULE B</span>
+              </div>
+              <p className="text-muted small mb-0" style={{ fontSize: '0.78rem' }}>
+                Automated surface defect classification using model <strong>BIT-PLATE-CV-1.0</strong>.
+              </p>
+            </div>
+          </div>
+          <div className="d-flex flex-wrap gap-2">
+            <Link to="/engineer/quality-inspection" className="btn btn-primary-industrial btn-sm d-flex align-items-center gap-1">
+              <Scan size={14} /> Single Inspection
+            </Link>
+            <Link to="/engineer/batch-inspection" className="btn btn-outline-primary btn-sm d-flex align-items-center gap-1">
+              <Layers size={14} /> Batch Inspection
+            </Link>
+            <Link to="/engineer/inspection-history" className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1">
+              <History size={14} /> Inspection History
+            </Link>
+          </div>
+        </div>
+      </div>
+
       {/* Top Machine Selector Bar */}
       <MachineSelector
         machines={machines}

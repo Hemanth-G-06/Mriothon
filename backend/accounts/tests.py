@@ -461,3 +461,263 @@ class SecurityAssuranceTestCase(TestCase):
         # Verify blacklisted token cannot be refreshed
         refresh_res = self.client.post('/api/auth/refresh/', {'refresh': refresh})
         self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+# ==============================================================================
+# 5. User Self-Registration API Tests (/api/auth/register/)
+# ==============================================================================
+
+class UserRegistrationAPITestCase(TestCase):
+    """
+    Validation and functional tests for new user registration:
+    - Gmail email domain restriction
+    - Password complexity verification
+    - Password confirmation match
+    - Automatic role assignment to ENGINEER
+    - Secure password hashing (no plaintext)
+    - Prevention of role escalation (Admin / Supervisor)
+    - Full authentication cycle for registered users
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.register_url = '/api/auth/register/'
+        self.login_url = '/api/auth/login/'
+
+        self.valid_payload = {
+            'first_name': 'Samantha',
+            'last_name': 'Smith',
+            'email': 'samantha.smith@gmail.com',
+            'password': 'Manual@123',
+            'password_confirm': 'Manual@123'
+        }
+
+    def test_registration_successful_creates_engineer_account(self):
+        response = self.client.post(self.register_url, self.valid_payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = response.json()
+
+        self.assertIn('message', data)
+        self.assertIn('user', data)
+        self.assertEqual(data['user']['email'], 'samantha.smith@gmail.com')
+        self.assertEqual(data['user']['first_name'], 'Samantha')
+        self.assertEqual(data['user']['last_name'], 'Smith')
+        self.assertEqual(data['user']['role'], 'ENGINEER')
+
+        # Verify database record
+        user = User.objects.get(email='samantha.smith@gmail.com')
+        self.assertEqual(user.first_name, 'Samantha')
+        self.assertEqual(user.last_name, 'Smith')
+        self.assertEqual(user.role, UserRole.ENGINEER)
+        self.assertTrue(user.is_active)
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+
+        # Verify password is encrypted and hashed
+        self.assertTrue(user.check_password('Manual@123'))
+        self.assertNotEqual(user.password, 'Manual@123')
+        self.assertTrue(user.password.startswith('pbkdf2_') or user.password.startswith('argon2'))
+
+    def test_duplicate_email_registration_rejected(self):
+        # Register user first time
+        User.objects.create_user(
+            email='existing.engineer@gmail.com',
+            password='Existing@123',
+            first_name='Existing',
+            last_name='User',
+            role=UserRole.ENGINEER
+        )
+
+        payload = {
+            **self.valid_payload,
+            'email': 'existing.engineer@gmail.com'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        data = response.json()
+        self.assertIn('email', data)
+        email_errors = data['email'] if isinstance(data['email'], list) else [data['email']]
+        self.assertTrue(any('already exists' in str(e).lower() for e in email_errors))
+
+    def test_non_gmail_address_rejected(self):
+        non_gmail_emails = [
+            'engineer@yahoo.com',
+            'engineer@outlook.com',
+            'engineer@manufacturing.corp',
+            'engineer@test.local'
+        ]
+        for bad_email in non_gmail_emails:
+            payload = {
+                **self.valid_payload,
+                'email': bad_email
+            }
+            response = self.client.post(self.register_url, payload)
+            self.assertEqual(
+                response.status_code,
+                status.HTTP_400_BAD_REQUEST,
+                f"Expected 400 for email: {bad_email}"
+            )
+            data = response.json()
+            self.assertIn('email', data)
+            self.assertIn('gmail.com', str(data['email']).lower())
+
+    def test_malformed_email_format_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'invalid-format'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', response.json())
+
+    def test_password_length_under_8_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'shortpass@gmail.com',
+            'password': 'Abc@1',
+            'password_confirm': 'Abc@1'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('password', response.json())
+        self.assertIn('8 characters', str(response.json()['password']).lower())
+
+    def test_password_first_char_not_uppercase_rejected(self):
+        invalid_first_chars = ['manual@123', '1Manual@', '@Manual123']
+        for bad_pass in invalid_first_chars:
+            payload = {
+                **self.valid_payload,
+                'email': f'testfirst_{abs(hash(bad_pass))}@gmail.com',
+                'password': bad_pass,
+                'password_confirm': bad_pass
+            }
+            response = self.client.post(self.register_url, payload)
+            self.assertEqual(
+                response.status_code,
+                status.HTTP_400_BAD_REQUEST,
+                f"Expected 400 for password: {bad_pass}"
+            )
+            self.assertIn('password', response.json())
+            self.assertIn('uppercase', str(response.json()['password']).lower())
+
+    def test_password_missing_lowercase_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'nolower@gmail.com',
+            'password': 'MANUAL@123',
+            'password_confirm': 'MANUAL@123'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('password', response.json())
+        self.assertIn('lowercase', str(response.json()['password']).lower())
+
+    def test_password_missing_number_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'nonumber@gmail.com',
+            'password': 'Manual@password',
+            'password_confirm': 'Manual@password'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('password', response.json())
+        self.assertIn('number', str(response.json()['password']).lower())
+
+    def test_password_missing_special_character_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'nospecial@gmail.com',
+            'password': 'ManualPassword123',
+            'password_confirm': 'ManualPassword123'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('password', response.json())
+        self.assertIn('special character', str(response.json()['password']).lower())
+
+    def test_password_confirmation_mismatch_rejected(self):
+        payload = {
+            **self.valid_payload,
+            'email': 'mismatch@gmail.com',
+            'password': 'Manual@123',
+            'password_confirm': 'Different@123'
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('password_confirm', response.json())
+        self.assertIn('match', str(response.json()['password_confirm']).lower())
+
+    def test_missing_first_or_last_name_rejected(self):
+        payload_no_first = {
+            **self.valid_payload,
+            'first_name': '   ',
+            'email': 'nofirst@gmail.com'
+        }
+        res1 = self.client.post(self.register_url, payload_no_first)
+        self.assertEqual(res1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('first_name', res1.json())
+
+        payload_no_last = {
+            **self.valid_payload,
+            'last_name': '',
+            'email': 'nolast@gmail.com'
+        }
+        res2 = self.client.post(self.register_url, payload_no_last)
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('last_name', res2.json())
+
+    def test_privilege_escalation_attempt_ignored(self):
+        """
+        Verify that passing 'role': 'ADMIN', 'is_staff': True, or 'is_superuser': True
+        during registration is safely stripped and assigns only the ENGINEER role.
+        """
+        payload = {
+            **self.valid_payload,
+            'email': 'hacker@gmail.com',
+            'role': 'ADMIN',
+            'is_staff': True,
+            'is_superuser': True
+        }
+        response = self.client.post(self.register_url, payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        user = User.objects.get(email='hacker@gmail.com')
+        self.assertEqual(user.role, UserRole.ENGINEER)
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+
+    def test_newly_registered_user_can_login(self):
+        """
+        Full end-to-end authentication cycle:
+        1. Register user via /api/auth/register/
+        2. Authenticate user via /api/auth/login/
+        3. Verify access token and role returned
+        """
+        email = 'new.engineer@gmail.com'
+        password = 'Engineer@2026'
+        reg_payload = {
+            'first_name': 'Marcus',
+            'last_name': 'Vance',
+            'email': email,
+            'password': password,
+            'password_confirm': password
+        }
+
+        # 1. Register
+        reg_res = self.client.post(self.register_url, reg_payload)
+        self.assertEqual(reg_res.status_code, status.HTTP_201_CREATED)
+
+        # 2. Login
+        login_res = self.client.post(self.login_url, {
+            'email': email,
+            'password': password
+        })
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        login_data = login_res.json()
+
+        self.assertIn('access', login_data)
+        self.assertIn('refresh', login_data)
+        self.assertIn('user', login_data)
+        self.assertEqual(login_data['user']['email'], email)
+        self.assertEqual(login_data['user']['role'], 'ENGINEER')

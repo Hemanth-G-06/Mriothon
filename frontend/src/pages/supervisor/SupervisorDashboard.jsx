@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { History, Search, Filter, MessageSquare, CheckCircle2, AlertTriangle, Eye, ShieldCheck, Calendar, User, Cpu } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { History, Search, Filter, MessageSquare, CheckCircle2, AlertTriangle, Eye, ShieldCheck, Calendar, User, Cpu, Scan } from 'lucide-react';
 import { supervisorService } from '../../services/supervisorService';
 import { machineService } from '../../services/machineService';
 import StatusBadge from '../../components/common/StatusBadge';
@@ -130,6 +131,14 @@ export default function SupervisorDashboard() {
           <p className="text-muted small mb-0">
             Monitor operator inquiries, verify manual grounding accuracy, and inspect insufficient-evidence escalations.
           </p>
+        </div>
+        <div>
+          <Link
+            to="/supervisor/inspection-review"
+            className="btn btn-primary-industrial btn-sm d-flex align-items-center gap-2"
+          >
+            <ShieldCheck size={15} /> Visual Inspection Review
+          </Link>
         </div>
       </div>
 
