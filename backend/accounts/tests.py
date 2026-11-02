@@ -255,7 +255,7 @@ class AuthenticationAPITestCase(TestCase):
     def test_logout_endpoint_blacklists_refresh_token_and_is_idempotent(self):
         login_res = self.client.post(
             self.login_url,
-            {'email': 'engineer@factory.local', 'password': self.password},
+            {'email': 'engineer@factory.local', 'password': self.user_password},
         )
         self.assertEqual(login_res.status_code, status.HTTP_200_OK)
         refresh_token = login_res.json()['refresh']
