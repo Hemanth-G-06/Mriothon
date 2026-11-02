@@ -1,0 +1,117 @@
+# ==============================================================================
+# Git Ignore - Manufacturing Manual Assistant
+# ==============================================================================
+
+# Python & Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+*.egg
+*.egg-info/
+.installed.cfg
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+dist/
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+backend/venv/
+backend/.venv/
+backend/env/
+backend/ENV/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Frontend Dependencies & Build Output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+coverage/
+
+# Generated Application Data & Local DBs
+*.sqlite3
+*.db
+backend/*.sqlite3
+logs/
+*.log
+backend/logs/
+media/*
+!media/.gitkeep
+backend/media/*
+!backend/media/.gitkeep
+
+# Vector Database, ChromaDB & AI Artifacts
+chroma/
+chromadb/
+.chroma/
+vectorstore/
+*.chromadb
+backend/chroma/
+backend/chromadb/
+backend/.chroma/
+backend/vectorstore/
+cache/
+model_cache/
+weights/
+*.bin
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Temporary document-processing files
+tmp/
+temp/
+backend/tmp/
+backend/temp/
+
+# IDE & Operating System Files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

@@ -1,0 +1,28 @@
+"""
+URL routing for Authentication and User Management.
+"""
+
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
+
+from accounts.views import (
+    CurrentUserView,
+    LoginView,
+    RefreshTokenView,
+    UserViewSet,
+)
+
+app_name = 'accounts'
+
+router = DefaultRouter()
+router.register(r'users', UserViewSet, basename='user')
+
+urlpatterns = [
+    # Authentication endpoints
+    path('auth/login/', LoginView.as_view(), name='login'),
+    path('auth/refresh/', RefreshTokenView.as_view(), name='token_refresh'),
+    path('auth/me/', CurrentUserView.as_view(), name='current_user'),
+
+    # User management endpoints (/api/users/, /api/users/{id}/)
+    path('', include(router.urls)),
+]

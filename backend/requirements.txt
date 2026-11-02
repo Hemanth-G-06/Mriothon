@@ -1,0 +1,23 @@
+# Core Web Framework & APIs
+Django==5.2.18
+djangorestframework==3.18.3
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+
+# Database Driver (PostgreSQL 18 / Psycopg 3)
+psycopg[binary]==3.3.6
+
+# Environment Configuration
+python-dotenv==1.2.4
+
+# JWT & Cryptography
+PyJWT==2.15.1
+
+# Transitive Dependencies
+asgiref==3.13.0
+sqlparse==0.6.1
+typing-extensions==4.16.0
+tzdata==2026.6
+
+typing-extensions==4.16.0
+tzdata==2026.6

@@ -1,0 +1,4 @@
+"""
+Django project configuration package.
+"""
+
