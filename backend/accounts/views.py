@@ -37,6 +37,28 @@ class RefreshTokenView(TokenRefreshView):
     permission_classes = [AllowAny]
 
 
+class LogoutView(APIView):
+    """
+    POST /api/auth/logout/
+    Terminates the user's JWT session by blacklisting the submitted refresh token.
+    Permits unauthenticated requests so logout succeeds even if the access token has expired.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        refresh_token = request.data.get('refresh')
+        if refresh_token:
+            try:
+                from rest_framework_simplejwt.tokens import RefreshToken
+                from rest_framework_simplejwt.exceptions import TokenError
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except Exception:
+                # Token may already be blacklisted or invalid; proceed with clean logout
+                pass
+        return Response({'detail': 'Successfully logged out.'}, status=status.HTTP_200_OK)
+
+
 class CurrentUserView(APIView):
     """
     GET /api/auth/me/

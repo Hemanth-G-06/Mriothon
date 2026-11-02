@@ -2,11 +2,12 @@
 URL routing for the Documents application.
 """
 
-from django.urls import path
+from rest_framework.routers import DefaultRouter
+from documents.views import DocumentViewSet
 
 app_name = 'documents'
 
-urlpatterns = [
-    # Document endpoints will be mapped here in subsequent phases.
-]
+router = DefaultRouter()
+router.register(r'', DocumentViewSet, basename='document')
 
+urlpatterns = router.urls

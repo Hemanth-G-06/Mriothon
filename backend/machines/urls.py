@@ -2,11 +2,12 @@
 URL routing for the Machines application.
 """
 
-from django.urls import path
+from rest_framework.routers import DefaultRouter
+from machines.views import MachineViewSet
 
 app_name = 'machines'
 
-urlpatterns = [
-    # Machine endpoints will be mapped here in subsequent phases.
-]
+router = DefaultRouter()
+router.register(r'', MachineViewSet, basename='machine')
 
+urlpatterns = router.urls

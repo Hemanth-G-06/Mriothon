@@ -23,4 +23,5 @@ urlpatterns = [
     path('api/documents/', include('documents.urls')),
     path('api/rag/', include('rag.urls')),
     path('api/history/', include('history.urls')),
+    path('api/supervisor/', include('history.urls')),
 ]

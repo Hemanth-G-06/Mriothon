@@ -8,6 +8,7 @@ from rest_framework.routers import DefaultRouter
 from accounts.views import (
     CurrentUserView,
     LoginView,
+    LogoutView,
     RefreshTokenView,
     UserViewSet,
 )
@@ -20,6 +21,7 @@ router.register(r'users', UserViewSet, basename='user')
 urlpatterns = [
     # Authentication endpoints
     path('auth/login/', LoginView.as_view(), name='login'),
+    path('auth/logout/', LogoutView.as_view(), name='logout'),
     path('auth/refresh/', RefreshTokenView.as_view(), name='token_refresh'),
     path('auth/me/', CurrentUserView.as_view(), name='current_user'),
 
