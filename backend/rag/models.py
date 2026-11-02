@@ -6,6 +6,7 @@ Stores chunk metadata and indexing state in Neon PostgreSQL without vector embed
 import uuid
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from pgvector.django import VectorField
 
 from documents.models import Document, DocumentPage
 
@@ -77,8 +78,9 @@ class DocumentIndex(models.Model):
 
 class DocumentChunk(models.Model):
     """
-    Stores chunk text and metadata in Neon PostgreSQL.
-    Embedding vectors are strictly stored in ChromaDB, never in PostgreSQL.
+    Stores chunk text, metadata, and (optionally) the 768-dim pgvector embedding in Neon PostgreSQL.
+    When VECTOR_BACKEND='pgvector', the embedding field is populated and used for cosine-distance retrieval.
+    When VECTOR_BACKEND='chroma', the chroma_vector_id field is used and embedding remains NULL.
     """
     id = models.UUIDField(
         primary_key=True,
@@ -131,6 +133,21 @@ class DocumentChunk(models.Model):
         _('embedding model'),
         max_length=255,
         help_text=_('Identifier of embedding model used to vectorize this chunk.')
+    )
+    embedding = VectorField(
+        dimensions=768,
+        null=True,
+        blank=True,
+        editable=False,
+        help_text=_(
+            '768-dimensional embedding (Nomic Embed Text v1.5); cosine distance is used for retrieval. '
+            'NULL when VECTOR_BACKEND=chroma or before pgvector re-indexing.'
+        )
+    )
+    embedding_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_('When the pgvector embedding was written or verified.')
     )
     created_at = models.DateTimeField(_('created at'), auto_now_add=True)
 

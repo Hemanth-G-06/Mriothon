@@ -14,6 +14,20 @@ pymupdf==2.0
 chromadb==1.5.9
 requests==2.34.2
 
+# pgvector — PostgreSQL vector similarity search (Django ORM integration)
+pgvector==0.5.1
+
+# Hosted LLM Answer Generation (Google Gemini API)
+google-genai>=2.34.0
+
+# Agentic AI & Orchestration (AgentOps)
+langgraph>=0.2.0
+
+# Telemetry, Observability & Prometheus Metrics
+prometheus-client>=0.20.0
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+
 # Environment Configuration
 python-dotenv==1.2.4
 

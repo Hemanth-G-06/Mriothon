@@ -1,18 +1,14 @@
+import logging
+from django.db import transaction
+from rag.services.chroma_service import ChromaService
+logger = logging.getLogger(__name__)
 """
 Views and API endpoints for Document Management, Page Text Extraction, and Secure Downloads.
 """
 
-import io
-from django.http import FileResponse, HttpResponse
-from rest_framework import status, viewsets
-from rest_framework.decorators import action
-from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.response import Response
-
-from accounts.permissions import IsAdminOrReadOnly
-from documents.models import Document
-from documents.serializers import DocumentSerializer
-from django.http import FileResponse, Http404
+import os
+import re
+from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.exceptions import PermissionDenied
@@ -21,6 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.models import UserRole
 from accounts.permissions import IsAdmin
 from documents.models import Document, DocumentStatus
 from documents.permissions import CanAccessDocumentObject, IsAdminUserOrReadOnly
@@ -41,81 +38,6 @@ from machines.services import can_user_access_machine
 
 class DocumentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for technical document assets:
-    - GET /api/documents/ (List documents, filterable by ?machine_id=)
-    - POST /api/documents/ or POST /api/documents/upload/ (Upload manual)
-    - GET /api/documents/{id}/ (Retrieve document details)
-    - GET /api/documents/{id}/pdf/ (View/Stream PDF)
-    - GET /api/documents/{id}/download/ (Download PDF)
-    """
-    queryset = Document.objects.select_related('machine').all()
-    serializer_class = DocumentSerializer
-    permission_classes = [IsAdminOrReadOnly]
-    parser_classes = [MultiPartParser, FormParser, JSONParser]
-    pagination_class = None
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        machine_id = self.request.query_params.get('machine_id') or self.request.query_params.get('machine')
-        if machine_id:
-            queryset = queryset.filter(machine_id=machine_id)
-        return queryset
-
-    def perform_create(self, serializer):
-        uploaded_file = self.request.FILES.get('file')
-        file_name = uploaded_file.name if uploaded_file else serializer.validated_data.get('file_name', '')
-        file_size = uploaded_file.size if uploaded_file else serializer.validated_data.get('file_size', 0)
-
-        serializer.save(
-            file_name=file_name,
-            file_size=file_size,
-            status='Indexed'  # In this deployment, mark as Indexed immediately for RAG accessibility
-        )
-
-    @action(detail=False, methods=['post'], url_path='upload')
-    def upload(self, request, *args, **kwargs):
-        """
-        Explicit upload endpoint: POST /api/documents/upload/
-        """
-        return self.create(request, *args, **kwargs)
-
-    @action(detail=True, methods=['get'], url_path='pdf')
-    def stream_pdf(self, request, pk=None):
-        """
-        GET /api/documents/{id}/pdf/
-        Streams the manual PDF for inline viewing.
-        """
-        document = self.get_object()
-        if document.file and hasattr(document.file, 'path'):
-            try:
-                response = FileResponse(open(document.file.path, 'rb'), content_type='application/pdf')
-                response['Content-Disposition'] = f'inline; filename="{document.file_name or "manual.pdf"}"'
-                return response
-            except FileNotFoundError:
-                pass
-
-        # Return lightweight valid placeholder PDF bytes if physical file is pending
-        placeholder_pdf = (
-            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
-            b"3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj\n"
-            b"xref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000052 00000 n\n0000000101 00000 n\n"
-            b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n"
-        )
-        response = HttpResponse(placeholder_pdf, content_type='application/pdf')
-        response['Content-Disposition'] = f'inline; filename="{document.file_name or "manual.pdf"}"'
-        return response
-
-    @action(detail=True, methods=['get'], url_path='download')
-    def download(self, request, pk=None):
-        """
-        GET /api/documents/{id}/download/
-        Downloads the manual PDF as attachment.
-        """
-        response = self.stream_pdf(request, pk)
-        document = self.get_object()
-        response['Content-Disposition'] = f'attachment; filename="{document.file_name or "manual.pdf"}"'
-        return response
     ViewSet for technical manual documents:
     - GET /api/documents/ (List accessible documents; optional ?machine_id= filter)
     - POST /api/documents/ (Administrator only: upload PDF)
@@ -154,17 +76,63 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-        Soft-deactivate a document rather than physically deleting records or files.
+        Deletes or deactivates a document.
+        - Admin only.
+        - If ?permanent=true (or default delete action):
+          Removes associated ChromaDB vectors, deletes the physical PDF file,
+          and removes relational DocumentPage, DocumentChunk, DocumentIndex, and Document records.
+        - If ?permanent=false:
+          Soft-deactivates the document (sets is_active to False).
         """
+        if request.user.role != UserRole.ADMIN and not request.user.is_superuser:
+            raise PermissionDenied("Only Administrators can delete or deactivate technical manuals.")
+
         document = self.get_object()
-        document.is_active = False
-        document.save(update_fields=['is_active', 'updated_at'])
+        permanent = request.query_params.get('permanent', 'false').lower() in ['true', '1']
+
+        if not permanent:
+            document.is_active = False
+            document.save(update_fields=['is_active', 'updated_at'])
+            return Response(
+                {
+                    "detail": "Document successfully deactivated.",
+                    "id": str(document.id),
+                    "is_active": document.is_active,
+                    "deleted": False,
+                },
+                status=status.HTTP_200_OK
+            )
+
+        # Permanent deletion workflow
+        doc_id_str = str(document.id)
+        doc_title = document.title
+
+        # 1. Clean up ChromaDB vectors only when legacy chroma backend is active
+        from django.conf import settings as _settings
+        if getattr(_settings, 'VECTOR_BACKEND', 'pgvector') == 'chroma':
+            try:
+                chroma_service = ChromaService()
+                chroma_service.delete_document_vectors(doc_id_str)
+            except Exception as exc:
+                logger.warning("Error deleting ChromaDB vectors for document %s: %s", doc_id_str, exc)
+
+        # 2. Clean up physical PDF file from storage
+        try:
+            if document.file:
+                document.file.delete(save=False)
+        except Exception as exc:
+            logger.warning("Error deleting PDF file for document %s: %s", doc_id_str, exc)
+
+        # 3. Atomic relational cascade deletion (removes DocumentPage, DocumentChunk, DocumentIndex)
+        with transaction.atomic():
+            document.delete()
 
         return Response(
             {
-                "detail": "Document successfully deactivated.",
-                "id": str(document.id),
-                "is_active": document.is_active,
+                "detail": f"Document '{doc_title}' and its vector index successfully deleted.",
+                "id": doc_id_str,
+                "title": doc_title,
+                "deleted": True,
             },
             status=status.HTTP_200_OK
         )
@@ -225,6 +193,142 @@ class DocumentDownloadView(APIView):
             as_attachment=True,
             filename=document.original_filename
         )
+        return response
+
+
+
+
+class DocumentViewerView(APIView):
+    """
+    Endpoint for secure, authenticated original PDF streaming and inline viewing:
+    - GET /api/documents/{id}/pdf/
+    - GET /api/documents/{id}/view/
+
+    Enforces authentication and machine-level authorization.
+    Supports HTTP 206 Partial Content byte-range requests and standard inline PDF delivery.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, document_id):
+        document = get_object_or_404(Document, pk=document_id)
+
+        # Enforce RBAC and machine-level authorization
+        if not can_user_access_document(request.user, document):
+            raise PermissionDenied("You do not have permission to view this technical manual.")
+
+        if not document.file:
+            raise Http404("Document file record is empty.")
+
+        # Verify physical file existence safely without path leakage
+        try:
+            file_path = document.file.path
+            if not os.path.exists(file_path):
+                raise Http404("The requested technical manual PDF file does not exist on disk.")
+        except (AttributeError, NotImplementedError):
+            if not document.file.storage.exists(document.file.name):
+                raise Http404("The requested technical manual PDF file does not exist on storage.")
+            file_path = None
+
+        # Determine total file size
+        try:
+            if file_path:
+                file_size = os.path.getsize(file_path)
+            else:
+                file_size = document.file.size
+        except Exception:
+            file_size = document.file_size or 0
+
+        original_filename = document.original_filename or "manual.pdf"
+        safe_filename = original_filename.replace('"', '\"')
+
+        # Check for HTTP Range header
+        range_header = request.META.get('HTTP_RANGE', '').strip()
+
+        if range_header:
+            range_match = re.match(r'^bytes=\s*(\d*)\s*-\s*(\d*)$', range_header)
+            if not range_match:
+                response = HttpResponse(status=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+                response['Content-Range'] = f'bytes */{file_size}'
+                response['Accept-Ranges'] = 'bytes'
+                return response
+
+            start_str, end_str = range_match.groups()
+
+            if start_str and end_str:
+                start = int(start_str)
+                end = int(end_str)
+                if start > end or start >= file_size:
+                    response = HttpResponse(status=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+                    response['Content-Range'] = f'bytes */{file_size}'
+                    response['Accept-Ranges'] = 'bytes'
+                    return response
+                end = min(end, file_size - 1)
+            elif start_str:
+                start = int(start_str)
+                if start >= file_size:
+                    response = HttpResponse(status=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+                    response['Content-Range'] = f'bytes */{file_size}'
+                    response['Accept-Ranges'] = 'bytes'
+                    return response
+                end = file_size - 1
+            elif end_str:
+                suffix = int(end_str)
+                if suffix <= 0:
+                    response = HttpResponse(status=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+                    response['Content-Range'] = f'bytes */{file_size}'
+                    response['Accept-Ranges'] = 'bytes'
+                    return response
+                start = max(0, file_size - suffix)
+                end = file_size - 1
+            else:
+                response = HttpResponse(status=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+                response['Content-Range'] = f'bytes */{file_size}'
+                response['Accept-Ranges'] = 'bytes'
+                return response
+
+            content_length = (end - start) + 1
+
+            # Memory-efficient chunked range streamer
+            def range_generator(f_obj, offset, length, chunk_size=65536):
+                try:
+                    f_obj.seek(offset)
+                    bytes_remaining = length
+                    while bytes_remaining > 0:
+                        chunk = f_obj.read(min(chunk_size, bytes_remaining))
+                        if not chunk:
+                            break
+                        bytes_remaining -= len(chunk)
+                        yield chunk
+                finally:
+                    f_obj.close()
+
+            file_obj = open(file_path, 'rb') if file_path else document.file.open('rb')
+            response = StreamingHttpResponse(
+                range_generator(file_obj, start, content_length),
+                status=status.HTTP_206_PARTIAL_CONTENT,
+                content_type='application/pdf'
+            )
+            response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+            response['Content-Length'] = str(content_length)
+            response['Content-Disposition'] = f'inline; filename="{safe_filename}"'
+            response['Accept-Ranges'] = 'bytes'
+            response['Cache-Control'] = 'private, max-age=3600'
+            response['X-Content-Type-Options'] = 'nosniff'
+            return response
+
+        # Standard GET response (no range requested)
+        file_obj = open(file_path, 'rb') if file_path else document.file.open('rb')
+        response = FileResponse(
+            file_obj,
+            content_type='application/pdf',
+            as_attachment=False,
+            filename=original_filename
+        )
+        response['Content-Disposition'] = f'inline; filename="{safe_filename}"'
+        response['Accept-Ranges'] = 'bytes'
+        response['Content-Length'] = str(file_size)
+        response['Cache-Control'] = 'private, max-age=3600'
+        response['X-Content-Type-Options'] = 'nosniff'
         return response
 
 

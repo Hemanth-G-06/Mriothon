@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Cpu, FileText, MessageSquare, History, X, Wrench, Shield, HardHat } from 'lucide-react';
+import { LayoutDashboard, Cpu, FileText, MessageSquare, History, X, Wrench, Shield, HardHat, Users } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
 export default function Sidebar({ isOpen, onClose }) {
@@ -11,6 +11,7 @@ export default function Sidebar({ isOpen, onClose }) {
       case 'admin':
         return [
           { to: '/admin', label: 'Admin Overview', icon: LayoutDashboard },
+          { to: '/admin/users', label: 'Users & Roles', icon: Users },
           { to: '/admin/machines', label: 'Registered Machines', icon: Cpu },
           { to: '/admin/documents', label: 'Manuals & Upload', icon: FileText }
         ];
@@ -102,7 +103,7 @@ export default function Sidebar({ isOpen, onClose }) {
         <div className="p-3 border-top border-secondary border-opacity-25 bg-black bg-opacity-20 text-secondary small">
           <div className="d-flex align-items-center gap-2">
             <span className="badge bg-secondary text-white" style={{ fontSize: '0.65rem' }}>v1.0.0</span>
-            <span style={{ fontSize: '0.75rem' }}>RAG Architecture</span>
+            <span style={{ fontSize: '0.75rem' }}>Gemini RAG Architecture</span>
           </div>
         </div>
       </aside>

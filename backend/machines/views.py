@@ -1,24 +1,11 @@
+import logging
+from django.db import transaction
+from rag.services.chroma_service import ChromaService
+logger = logging.getLogger(__name__)
 """
 Views and API endpoints for Machine Management and Engineer Assignments.
 """
 
-from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
-from accounts.permissions import IsAdminOrReadOnly
-from machines.models import Machine
-from machines.serializers import MachineSerializer
-
-
-class MachineViewSet(viewsets.ModelViewSet):
-    """
-    CRUD viewset for Machine assets.
-    - Any authenticated user (Admin, Engineer, Supervisor) can list and view machines.
-    - Only Admins can register, update, or delete machine assets.
-    """
-    queryset = Machine.objects.all()
-    serializer_class = MachineSerializer
-    permission_classes = [IsAdminOrReadOnly]
-    pagination_class = None  # Return unpaginated list directly for clean frontend consumption
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
@@ -77,19 +64,72 @@ class MachineViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-        Soft-deactivate a machine rather than physically deleting records.
-        Preserves machine history, manual linkages, and query references.
+        Deletes or deactivates a machine.
+        - Admin only.
+        - If ?permanent=true (or default delete action):
+          Cleans up ChromaDB vectors for all associated documents and the machine,
+          removes physical PDF files, and safely cascades relational records.
+        - If ?permanent=false:
+          Soft-deactivates the machine (sets status to INACTIVE).
         """
+        if request.user.role != UserRole.ADMIN and not request.user.is_superuser:
+            raise PermissionDenied("Only Administrators can delete or deactivate machines.")
+
         machine = self.get_object()
-        machine.status = MachineStatus.INACTIVE
-        machine.save(update_fields=['status', 'updated_at'])
+        permanent = request.query_params.get('permanent', 'false').lower() in ['true', '1']
+
+        if not permanent:
+            machine.status = MachineStatus.INACTIVE
+            machine.save(update_fields=['status', 'updated_at'])
+            return Response(
+                {
+                    "detail": "Machine successfully deactivated.",
+                    "id": str(machine.id),
+                    "machine_code": machine.machine_code,
+                    "status": machine.status,
+                    "deleted": False,
+                },
+                status=status.HTTP_200_OK
+            )
+
+        # Permanent deletion workflow
+        docs = list(machine.documents.all())
+        from django.conf import settings as _settings
+        if getattr(_settings, 'VECTOR_BACKEND', 'pgvector') == 'chroma':
+            chroma_service = ChromaService()
+            # 1. Clean up ChromaDB vectors for each associated document
+            for doc in docs:
+                try:
+                    chroma_service.delete_document_vectors(str(doc.id))
+                except Exception as exc:
+                    logger.warning("Error deleting ChromaDB vectors for document %s: %s", doc.id, exc)
+
+            # 2. Clean up any remaining machine-level ChromaDB vectors
+            try:
+                chroma_service.delete_machine_vectors(str(machine.id))
+            except Exception as exc:
+                logger.warning("Error deleting ChromaDB machine vectors for %s: %s", machine.id, exc)
+
+        # 3. Clean up physical PDF files from storage
+        for doc in docs:
+            try:
+                if doc.file:
+                    doc.file.delete(save=False)
+            except Exception as exc:
+                logger.warning("Error deleting PDF file for document %s: %s", doc.id, exc)
+
+        # 4. Atomic relational cascade deletion
+        machine_code = machine.machine_code
+        machine_id_str = str(machine.id)
+        with transaction.atomic():
+            machine.delete()
 
         return Response(
             {
-                "detail": "Machine successfully deactivated.",
-                "id": str(machine.id),
-                "machine_code": machine.machine_code,
-                "status": machine.status,
+                "detail": f"Machine '{machine_code}' and associated documents/vectors successfully deleted.",
+                "id": machine_id_str,
+                "machine_code": machine_code,
+                "deleted": True,
             },
             status=status.HTTP_200_OK
         )

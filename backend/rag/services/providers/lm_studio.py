@@ -25,6 +25,7 @@ class LMStudioEmbeddingProvider(BaseEmbeddingProvider):
     DEFAULT_MODEL = 'nomic-ai/nomic-embed-text-v1.5-GGUF'
     NOMIC_DIMENSION = 768
     NOMIC_DOCUMENT_PREFIX = 'search_document: '
+    NOMIC_QUERY_PREFIX = 'search_query: '
 
     def __init__(
         self,
@@ -54,6 +55,16 @@ class LMStudioEmbeddingProvider(BaseEmbeddingProvider):
             return f"{self.NOMIC_DOCUMENT_PREFIX}{clean}"
         return clean
 
+    def _format_query(self, text: str) -> str:
+        """
+        Applies model-specific query prefixing.
+        Nomic Embed Text requires 'search_query: ' for search queries.
+        """
+        clean = text.strip()
+        if self.is_nomic and not clean.startswith(self.NOMIC_QUERY_PREFIX):
+            return f"{self.NOMIC_QUERY_PREFIX}{clean}"
+        return clean
+
     def _execute_request(self, payload: dict) -> requests.Response:
         try:
             response = requests.post(
@@ -68,8 +79,8 @@ class LMStudioEmbeddingProvider(BaseEmbeddingProvider):
             ) from e
         except requests.exceptions.ConnectionError as e:
             raise EmbeddingProviderError(
-                f"Could not connect to LM Studio at {self.endpoint}. "
-                f"Verify that LM Studio local server is running: {e}"
+                f"Embedding service unavailable. Please ensure LM Studio is running with "
+                f"{self.model_identifier} at {self.base_url} or configure an alternative embedding provider."
             ) from e
         except requests.exceptions.RequestException as e:
             raise EmbeddingProviderError(f"LM Studio request error: {e}") from e
@@ -87,6 +98,26 @@ class LMStudioEmbeddingProvider(BaseEmbeddingProvider):
             raise EmbeddingProviderError("Cannot embed empty text.")
 
         formatted = self._format_input(text)
+        payload = {
+            "model": self.model_identifier,
+            "input": formatted
+        }
+        response = self._execute_request(payload)
+        data = response.json()
+
+        try:
+            embedding = data["data"][0]["embedding"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise EmbeddingProviderError(f"Malformed response from LM Studio: {data}") from e
+
+        return self.validate_embedding(embedding)
+
+    def embed_query(self, query: str) -> List[float]:
+        """Generates embedding for a search query using search_query: prefix for Nomic."""
+        if not query or not query.strip():
+            raise EmbeddingProviderError("Cannot embed empty query.")
+
+        formatted = self._format_query(query)
         payload = {
             "model": self.model_identifier,
             "input": formatted

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, Upload, Plus, Filter, Search, CheckCircle2, AlertCircle, Eye, RefreshCw } from 'lucide-react';
+import { FileText, Upload, Plus, Filter, Search, CheckCircle2, AlertCircle, Eye, RefreshCw, Database, Trash2, AlertTriangle } from 'lucide-react';
 import { documentService } from '../../services/documentService';
 import { machineService } from '../../services/machineService';
 import StatusBadge from '../../components/common/StatusBadge';
@@ -13,6 +13,8 @@ import { getErrorMessage } from '../../utils/errorHandler';
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState([]);
   const [machines, setMachines] = useState([]);
+  const [indexStatuses, setIndexStatuses] = useState({});
+  const [indexingDocId, setIndexingDocId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedMachineFilter, setSelectedMachineFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -30,10 +32,16 @@ export default function DocumentsPage() {
     manual_type: MANUAL_TYPES[0],
     model_number: '',
     revision: 'Rev 1.0',
+    description: '',
     file: null
   });
 
   // PDF Preview State
+  // Delete Document Modal State
+  const [showDeleteDocModal, setShowDeleteDocModal] = useState(false);
+  const [documentToDelete, setDocumentToDelete] = useState(null);
+  const [isDeletingDoc, setIsDeletingDoc] = useState(false);
+
   const [pdfPreview, setPdfPreview] = useState({
     isOpen: false,
     documentId: null,
@@ -49,8 +57,23 @@ export default function DocumentsPage() {
         documentService.getDocuments(selectedMachineFilter || null),
         machineService.getMachines()
       ]);
-      setDocuments(Array.isArray(docList) ? docList : []);
+      const docs = Array.isArray(docList) ? docList : [];
+      setDocuments(docs);
       setMachines(Array.isArray(machList) ? machList : []);
+
+      // Load ChromaDB indexing status for each document
+      const statusMap = {};
+      await Promise.allSettled(
+        docs.map(async (d) => {
+          try {
+            const idx = await documentService.getIndexStatus(d.id);
+            statusMap[d.id] = idx;
+          } catch {
+            statusMap[d.id] = { status: 'PENDING', chunk_count: 0 };
+          }
+        })
+      );
+      setIndexStatuses(statusMap);
     } catch (err) {
       setFeedback({ type: 'danger', message: getErrorMessage(err, 'Failed to retrieve documents or equipment registry.') });
       setDocuments([]);
@@ -64,27 +87,6 @@ export default function DocumentsPage() {
     loadData();
   }, [selectedMachineFilter]);
 
-  // Poll for document status updates if any document is in non-terminal state (Uploaded or Processing)
-  useEffect(() => {
-    const hasPending = documents.some((d) => {
-      const s = d.status?.toLowerCase();
-      return s === 'uploaded' || s === 'processing';
-    });
-
-    if (!hasPending) return;
-
-    const timer = setInterval(async () => {
-      try {
-        const docList = await documentService.getDocuments(selectedMachineFilter || null);
-        setDocuments(Array.isArray(docList) ? docList : []);
-      } catch (e) {
-        console.warn('Document status polling error:', e);
-      }
-    }, 4000);
-
-    return () => clearInterval(timer);
-  }, [documents, selectedMachineFilter]);
-
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -95,7 +97,6 @@ export default function DocumentsPage() {
       setUploadForm((prev) => ({
         ...prev,
         file: file,
-        // Auto-fill title from filename if not manually typed
         title: prev.title || file.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' ')
       }));
     }
@@ -124,9 +125,9 @@ export default function DocumentsPage() {
     formData.append('file', uploadForm.file);
     formData.append('machine_id', uploadForm.machine_id);
     formData.append('title', uploadForm.title.trim());
-    formData.append('manual_type', uploadForm.manual_type);
-    formData.append('model_number', uploadForm.model_number || '');
-    formData.append('revision', uploadForm.revision || 'Rev 1.0');
+    if (uploadForm.description) {
+      formData.append('description', uploadForm.description.trim());
+    }
 
     try {
       const result = await documentService.uploadDocument(formData, (progressEvent) => {
@@ -136,9 +137,10 @@ export default function DocumentsPage() {
         }
       });
 
+      // Synchronous PDF extraction completed, now automatically trigger indexing
       setFeedback({
         type: 'success',
-        message: `Manual "${uploadForm.title}" uploaded! Document status: ${result.status || 'Uploaded'}. Vector indexing will proceed in the backend.`
+        message: `Manual "${uploadForm.title}" uploaded and extracted successfully! Triggering vector indexing...`
       });
       setShowUploadModal(false);
       setUploadForm({
@@ -147,17 +149,79 @@ export default function DocumentsPage() {
         manual_type: MANUAL_TYPES[0],
         model_number: '',
         revision: 'Rev 1.0',
+        description: '',
         file: null
       });
       setUploadProgress(0);
+
+      // Trigger indexing
+      try {
+        await documentService.indexDocument(result.id);
+        setFeedback({
+          type: 'success',
+          message: `Manual "${uploadForm.title}" successfully indexed into ChromaDB vector database and ready for querying!`
+        });
+      } catch (idxErr) {
+        console.warn('Auto indexing notice:', idxErr);
+      }
+
       await loadData();
     } catch (err) {
       setFeedback({
         type: 'danger',
-        message: getErrorMessage(err, 'Manual upload failed. Ensure the backend endpoint is accessible.')
+        message: getErrorMessage(err, 'Manual upload failed. Ensure the PDF is valid.')
       });
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleTriggerIndex = async (docId, docTitle) => {
+    setIndexingDocId(docId);
+    setFeedback({ type: '', message: '' });
+    try {
+      const res = await documentService.indexDocument(docId);
+      setFeedback({
+        type: 'success',
+        message: `Document "${docTitle}" indexed into ChromaDB! (${res.index?.chunk_count || res.chunk_count || 0} chunks)`
+      });
+      await loadData();
+    } catch (err) {
+      setFeedback({
+        type: 'danger',
+        message: getErrorMessage(err, 'Indexing operation failed.')
+      });
+    } finally {
+      setIndexingDocId(null);
+    }
+  };
+
+  const handleConfirmDeleteDoc = async () => {
+    if (!documentToDelete || isDeletingDoc) return;
+    const targetDoc = documentToDelete;
+    setIsDeletingDoc(true);
+    setFeedback({ type: '', message: '' });
+    try {
+      await documentService.deleteDocument(targetDoc.id, true);
+      if (pdfPreview.documentId === targetDoc.id) {
+        setPdfPreview((prev) => ({ ...prev, isOpen: false, documentId: null }));
+      }
+      setShowDeleteDocModal(false);
+      setDocumentToDelete(null);
+      setFeedback({
+        type: 'success',
+        message: `Manual "${targetDoc.title}" and its vector index were permanently deleted.`
+      });
+      await loadData();
+    } catch (err) {
+      setShowDeleteDocModal(false);
+      setDocumentToDelete(null);
+      setFeedback({
+        type: 'danger',
+        message: getErrorMessage(err, `Failed to delete manual "${targetDoc.title}".`)
+      });
+    } finally {
+      setIsDeletingDoc(false);
     }
   };
 
@@ -166,9 +230,8 @@ export default function DocumentsPage() {
     return (
       d.title?.toLowerCase().includes(q) ||
       d.machine_name?.toLowerCase().includes(q) ||
-      d.model_number?.toLowerCase().includes(q) ||
-      d.manual_type?.toLowerCase().includes(q) ||
-      d.revision?.toLowerCase().includes(q)
+      d.machine_code?.toLowerCase().includes(q) ||
+      d.original_filename?.toLowerCase().includes(q)
     );
   });
 
@@ -179,7 +242,7 @@ export default function DocumentsPage() {
         <div>
           <h4 className="fw-bold text-dark mb-1">Manuals & Technical Documentation</h4>
           <p className="text-muted small mb-0">
-            Upload OEM technical manuals, schematics, and view RAG indexing pipeline status.
+            Upload OEM technical manuals, schematics, and monitor ChromaDB RAG vector indexing pipeline.
           </p>
         </div>
         <button
@@ -215,7 +278,7 @@ export default function DocumentsPage() {
               <input
                 type="text"
                 className="form-control border-start-0"
-                placeholder="Search manuals, titles, revisions..."
+                placeholder="Search manuals, titles, machines..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -235,7 +298,7 @@ export default function DocumentsPage() {
                 <option value="">All Machines</option>
                 {machines.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name}
+                    {m.name} ({m.machine_code || 'CODE'})
                   </option>
                 ))}
               </select>
@@ -266,67 +329,123 @@ export default function DocumentsPage() {
           }
         />
       ) : (
-        <div className="card card-industrial bg-white overflow-hidden">
+        <div className="card card-industrial bg-white overflow-hidden shadow-sm">
           <div className="table-responsive">
-            <table className="table table-hover align-middle mb-0">
-              <thead className="table-light">
+            <table className="table table-hover align-middle mb-0" style={{ fontSize: '0.88rem' }}>
+              <thead className="table-light text-secondary text-uppercase" style={{ fontSize: '0.75rem', letterSpacing: '0.04em' }}>
                 <tr>
-                  <th className="small text-secondary fw-semibold">Manual Title</th>
-                  <th className="small text-secondary fw-semibold">Target Machine</th>
-                  <th className="small text-secondary fw-semibold">Type & Rev</th>
-                  <th className="small text-secondary fw-semibold">Size</th>
-                  <th className="small text-secondary fw-semibold text-center">RAG Index Status</th>
-                  <th className="small text-secondary fw-semibold text-end">Action</th>
+                  <th className="ps-3">Manual Title</th>
+                  <th>Machine Association</th>
+                  <th>Pages & Size</th>
+                  <th>PDF Extraction</th>
+                  <th>ChromaDB Index</th>
+                  <th className="text-end pe-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredDocs.map((doc) => (
-                  <tr key={doc.id}>
-                    <td>
-                      <div className="d-flex align-items-center gap-2">
-                        <FileText size={18} className="text-danger flex-shrink-0" />
-                        <div>
-                          <div className="fw-semibold text-dark small">{doc.title}</div>
-                          <div className="text-muted font-monospace" style={{ fontSize: '0.7rem' }}>
-                            {doc.file_name || 'document.pdf'}
+                {filteredDocs.map((doc) => {
+                  const idxStatus = indexStatuses[doc.id];
+                  const isIndexed = idxStatus?.status === 'READY';
+                  const isExtractionReady = doc.status === 'READY';
+
+                  return (
+                    <tr key={doc.id}>
+                      <td className="ps-3">
+                        <div className="d-flex align-items-center gap-2">
+                          <FileText size={18} className="text-danger flex-shrink-0" />
+                          <div>
+                            <div className="fw-semibold text-dark small">{doc.title}</div>
+                            <div className="text-muted font-monospace" style={{ fontSize: '0.7rem' }}>
+                              {doc.original_filename || 'document.pdf'}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="small text-dark fw-medium">
-                      {doc.machine_name || `Machine #${doc.machine_id}`}
-                    </td>
-                    <td className="small">
-                      <div className="text-muted">{doc.manual_type}</div>
-                      <span className="badge bg-light text-secondary border" style={{ fontSize: '0.68rem' }}>
-                        {doc.revision || 'Rev 1.0'}
-                      </span>
-                    </td>
-                    <td className="small text-muted">{formatFileSize(doc.file_size)}</td>
-                    <td className="text-center">
-                      <StatusBadge status={doc.status} />
-                    </td>
-                    <td className="text-end">
-                      <button
-                        className="btn btn-sm btn-outline-secondary d-inline-flex align-items-center gap-1"
-                        style={{ fontSize: '0.78rem' }}
-                        onClick={() =>
-                          setPdfPreview({
-                            isOpen: true,
-                            documentId: doc.id,
-                            documentTitle: doc.title,
-                            revision: doc.revision,
-                            pageNumber: 1
-                          })
-                        }
-                        title="Preview Manual"
-                      >
-                        <Eye size={13} />
-                        <span>Inspect</span>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="small text-dark fw-medium">
+                        <div>{doc.machine_name || 'Machine'}</div>
+                        <span className="badge bg-light text-secondary border font-monospace" style={{ fontSize: '0.7rem' }}>
+                          {doc.machine_code}
+                        </span>
+                      </td>
+                      <td className="small text-muted">
+                        <div>{doc.page_count ? `${doc.page_count} pages` : '—'}</div>
+                        <span style={{ fontSize: '0.75rem' }}>{formatFileSize(doc.file_size)}</span>
+                      </td>
+                      <td>
+                        <StatusBadge status={doc.status} />
+                      </td>
+                      <td>
+                        {isIndexed ? (
+                          <span className="badge bg-success bg-opacity-10 text-success border border-success small d-inline-flex align-items-center gap-1">
+                            <CheckCircle2 size={12} /> Ready ({idxStatus.chunk_count} chunks)
+                          </span>
+                        ) : idxStatus?.status === 'FAILED' ? (
+                          <span className="badge bg-danger bg-opacity-10 text-danger border border-danger small">
+                            Indexing Failed
+                          </span>
+                        ) : (
+                          <span className="badge bg-warning bg-opacity-10 text-dark border border-warning small">
+                            Not Indexed
+                          </span>
+                        )}
+                      </td>
+                      <td className="text-end pe-3">
+                        <div className="d-flex justify-content-end gap-1">
+                          {isExtractionReady && (
+                            <button
+                              className="btn btn-sm btn-outline-primary d-inline-flex align-items-center gap-1 py-0 px-2"
+                              style={{ fontSize: '0.75rem' }}
+                              onClick={() => handleTriggerIndex(doc.id, doc.title)}
+                              disabled={indexingDocId === doc.id}
+                              title="Index chunks into ChromaDB"
+                            >
+                              {indexingDocId === doc.id ? (
+                                <>
+                                  <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" style={{ width: '0.7rem', height: '0.7rem' }} />
+                                  <span>Indexing...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Database size={12} />
+                                  <span>{isIndexed ? 'Re-index' : 'Index'}</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-sm btn-outline-secondary d-inline-flex align-items-center gap-1 py-0 px-2"
+                            style={{ fontSize: '0.75rem' }}
+                            onClick={() =>
+                              setPdfPreview({
+                                isOpen: true,
+                                documentId: doc.id,
+                                documentTitle: doc.title,
+                                revision: doc.revision || '1.0',
+                                pageNumber: 1
+                              })
+                            }
+                            title="Inspect PDF manual"
+                          >
+                            <Eye size={12} />
+                            <span>Inspect</span>
+                          </button>
+                          <button
+                            className="btn btn-sm btn-outline-danger d-inline-flex align-items-center gap-1 py-0 px-2"
+                            style={{ fontSize: '0.75rem' }}
+                            onClick={() => {
+                              setDocumentToDelete(doc);
+                              setShowDeleteDocModal(true);
+                            }}
+                            title="Delete manual"
+                          >
+                            <Trash2 size={12} />
+                            <span>Delete</span>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -362,22 +481,14 @@ export default function DocumentsPage() {
                     <select
                       className="form-select form-select-sm"
                       value={uploadForm.machine_id}
-                      onChange={(e) => {
-                        const mId = e.target.value;
-                        const matched = machines.find((m) => String(m.id) === String(mId));
-                        setUploadForm((prev) => ({
-                          ...prev,
-                          machine_id: mId,
-                          model_number: matched ? matched.model_number : prev.model_number
-                        }));
-                      }}
+                      onChange={(e) => setUploadForm((prev) => ({ ...prev, machine_id: e.target.value }))}
                       required
                       disabled={isUploading}
                     >
                       <option value="">-- Choose Machine Association --</option>
                       {machines.map((m) => (
                         <option key={m.id} value={m.id}>
-                          {m.name} ({m.model_number || 'Standard'})
+                          {m.name} ({m.machine_code || 'CODE'})
                         </option>
                       ))}
                     </select>
@@ -404,66 +515,36 @@ export default function DocumentsPage() {
                     )}
                   </div>
 
-                  <div className="row g-2 mb-3">
-                    <div className="col-12 col-md-8">
-                      <label className="form-label small fw-semibold text-secondary">Document Title *</label>
-                      <input
-                        type="text"
-                        className="form-control form-control-sm"
-                        placeholder="e.g. HP-200 Operations Manual"
-                        value={uploadForm.title}
-                        onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
-                        required
-                        disabled={isUploading}
-                      />
-                    </div>
-                    <div className="col-12 col-md-4">
-                      <label className="form-label small fw-semibold text-secondary">Revision</label>
-                      <input
-                        type="text"
-                        className="form-control form-control-sm"
-                        placeholder="e.g. Rev 2.4"
-                        value={uploadForm.revision}
-                        onChange={(e) => setUploadForm({ ...uploadForm, revision: e.target.value })}
-                        disabled={isUploading}
-                      />
-                    </div>
+                  <div className="mb-3">
+                    <label className="form-label small fw-semibold text-secondary">Document Title *</label>
+                    <input
+                      type="text"
+                      className="form-control form-control-sm"
+                      placeholder="e.g. Haas VMC Operations Manual"
+                      value={uploadForm.title}
+                      onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
+                      required
+                      disabled={isUploading}
+                    />
                   </div>
 
-                  <div className="row g-2 mb-3">
-                    <div className="col-12 col-md-6">
-                      <label className="form-label small fw-semibold text-secondary">Manual Type</label>
-                      <select
-                        className="form-select form-select-sm"
-                        value={uploadForm.manual_type}
-                        onChange={(e) => setUploadForm({ ...uploadForm, manual_type: e.target.value })}
-                        disabled={isUploading}
-                      >
-                        {MANUAL_TYPES.map((type) => (
-                          <option key={type} value={type}>
-                            {type}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-12 col-md-6">
-                      <label className="form-label small fw-semibold text-secondary">Applicable Model Number</label>
-                      <input
-                        type="text"
-                        className="form-control form-control-sm"
-                        placeholder="e.g. HP-200-V4"
-                        value={uploadForm.model_number}
-                        onChange={(e) => setUploadForm({ ...uploadForm, model_number: e.target.value })}
-                        disabled={isUploading}
-                      />
-                    </div>
+                  <div className="mb-0">
+                    <label className="form-label small fw-semibold text-secondary">Description (Optional)</label>
+                    <textarea
+                      rows={2}
+                      className="form-control form-control-sm"
+                      placeholder="e.g. Factory maintenance protocols, lubrication intervals, spindle warmup"
+                      value={uploadForm.description}
+                      onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
+                      disabled={isUploading}
+                    />
                   </div>
 
                   {/* Upload Progress Bar */}
                   {isUploading && (
                     <div className="mt-3">
                       <div className="d-flex justify-content-between small text-muted mb-1">
-                        <span>Uploading binary payload...</span>
+                        <span>Uploading & extracting pages...</span>
                         <span>{uploadProgress}%</span>
                       </div>
                       <div className="progress" style={{ height: '8px' }}>
@@ -498,7 +579,7 @@ export default function DocumentsPage() {
                       </>
                     ) : (
                       <>
-                        <Upload size={14} /> Upload & Dispatch to Indexer
+                        <Upload size={14} /> Upload & Extract
                       </>
                     )}
                   </button>
@@ -518,6 +599,93 @@ export default function DocumentsPage() {
         revision={pdfPreview.revision}
         pageNumber={pdfPreview.pageNumber}
       />
-    </div>
+    
+      {/* Delete Document Confirmation Modal */}
+      {showDeleteDocModal && documentToDelete && (
+        <div className="modal fade show d-block" tabIndex="-1" style={{ backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1055 }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow">
+              <div className="modal-header bg-danger text-white">
+                <div className="d-flex align-items-center gap-2">
+                  <AlertTriangle size={20} />
+                  <h5 className="modal-title fw-bold">Delete Technical Manual</h5>
+                </div>
+                <button
+                  type="button"
+                  className="btn-close btn-close-white"
+                  onClick={() => { if (!isDeletingDoc) { setShowDeleteDocModal(false); setDocumentToDelete(null); } }}
+                  disabled={isDeletingDoc}
+                />
+              </div>
+              <div className="modal-body p-4">
+                <p className="mb-3 text-dark">
+                  Are you sure you want to permanently delete <strong>{documentToDelete.title}</strong>?
+                </p>
+
+                <div className="card bg-light border p-3 mb-3 small">
+                  <div className="d-flex justify-content-between mb-1">
+                    <span className="text-muted">Filename:</span>
+                    <strong className="font-monospace text-dark">{documentToDelete.original_filename || 'manual.pdf'}</strong>
+                  </div>
+                  <div className="d-flex justify-content-between mb-1">
+                    <span className="text-muted">Associated Machine:</span>
+                    <span className="text-dark fw-medium">{documentToDelete.machine_name || 'Machine'} ({documentToDelete.machine_code || 'CODE'})</span>
+                  </div>
+                  <div className="d-flex justify-content-between mb-1">
+                    <span className="text-muted">Revision:</span>
+                    <span className="badge bg-secondary">{documentToDelete.revision || 'Rev 1.0'}</span>
+                  </div>
+                  <div className="d-flex justify-content-between mb-1">
+                    <span className="text-muted">Page Count:</span>
+                    <span>{documentToDelete.page_count ? `${documentToDelete.page_count} pages` : 'N/A'}</span>
+                  </div>
+                  <div className="d-flex justify-content-between">
+                    <span className="text-muted">Index Status:</span>
+                    <span className="badge bg-primary">
+                      {indexStatuses[documentToDelete.id]?.status || 'PENDING'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="alert alert-warning py-2 small d-flex align-items-start gap-2 mb-0">
+                  <AlertTriangle size={16} className="text-warning flex-shrink-0 mt-1" />
+                  <div>
+                    <strong>Permanent Deletion Warning:</strong> Deleting this manual will permanently remove the private PDF file from disk, delete all extracted page text records, and purge all associated vector chunks and embeddings from PostgreSQL (pgvector). This action cannot be undone.
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer bg-light">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => { if (!isDeletingDoc) { setShowDeleteDocModal(false); setDocumentToDelete(null); } }}
+                  disabled={isDeletingDoc}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger d-flex align-items-center gap-1"
+                  onClick={handleConfirmDeleteDoc}
+                  disabled={isDeletingDoc}
+                >
+                  {isDeletingDoc ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                      <span>Deleting Manual & Vectors...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={14} />
+                      <span>Permanently Delete</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+</div>
   );
 }

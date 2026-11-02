@@ -2,14 +2,14 @@ import axios from 'axios';
 
 // Centralized backend API base URL from environment
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
-export const USE_MOCK_FALLBACK = import.meta.env.VITE_USE_MOCK_FALLBACK !== 'false';
+export const USE_MOCK_FALLBACK = import.meta.env.VITE_USE_MOCK_FALLBACK === 'true';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json'
   },
-  timeout: 15000
+  timeout: 60000
 });
 
 // Request interceptor to attach JWT access token
@@ -24,11 +24,30 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// Concurrency control for token refreshing
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
 // Response interceptor for automatic refresh / 401 handling
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+
+    if (!originalRequest) {
+      return Promise.reject(error);
+    }
 
     const isAuthEndpoint = originalRequest.url && (
       originalRequest.url.includes('/auth/login/') ||
@@ -38,7 +57,20 @@ apiClient.interceptors.response.use(
 
     // Handle 401 Unauthorized (token expired) on protected endpoints
     if (error.response && error.response.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then((token) => {
+            originalRequest.headers.Authorization = `Bearer ${token}`;
+            return apiClient(originalRequest);
+          })
+          .catch((err) => Promise.reject(err));
+      }
+
       originalRequest._retry = true;
+      isRefreshing = true;
+
       const refreshToken = localStorage.getItem('refresh_token');
 
       if (refreshToken && !refreshToken.startsWith('mock-')) {
@@ -47,24 +79,33 @@ apiClient.interceptors.response.use(
             refresh: refreshToken
           });
           if (res.data && res.data.access) {
-            localStorage.setItem('access_token', res.data.access);
-            apiClient.defaults.headers.common.Authorization = `Bearer ${res.data.access}`;
-            originalRequest.headers.Authorization = `Bearer ${res.data.access}`;
+            const newAccess = res.data.access;
+            localStorage.setItem('access_token', newAccess);
+            apiClient.defaults.headers.common.Authorization = `Bearer ${newAccess}`;
+            originalRequest.headers.Authorization = `Bearer ${newAccess}`;
+            processQueue(null, newAccess);
             return apiClient(originalRequest);
           }
         } catch (refreshErr) {
-          // Token refresh failed, clean up and redirect to login
+          processQueue(refreshErr, null);
           localStorage.removeItem('access_token');
           localStorage.removeItem('refresh_token');
           localStorage.removeItem('user_info');
-          window.location.href = '/login?session_expired=true';
+          if (window.location.pathname !== '/login') {
+            window.location.href = '/login?session_expired=true';
+          }
           return Promise.reject(refreshErr);
+        } finally {
+          isRefreshing = false;
         }
       } else {
+        isRefreshing = false;
         localStorage.removeItem('access_token');
         localStorage.removeItem('refresh_token');
         localStorage.removeItem('user_info');
-        window.location.href = '/login?session_expired=true';
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login?session_expired=true';
+        }
       }
     }
 

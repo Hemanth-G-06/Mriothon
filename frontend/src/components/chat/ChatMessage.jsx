@@ -12,11 +12,13 @@ export default function ChatMessage({ message, machineName, onOpenPdf }) {
   const isInsufficient = Boolean(
     is_insufficient_evidence === true ||
     message.is_insufficient_evidence === true ||
+    message.abstained === true ||
     message.insufficient_evidence === true ||
     message.status === 'insufficient_evidence' ||
     message.has_sufficient_evidence === false ||
     message.evidence_found === false ||
     (typeof answer === 'string' && (
+      answer.toLowerCase().includes("not contain enough information") ||
       answer.toLowerCase().includes("couldn't find sufficient information") ||
       answer.toLowerCase().includes("insufficient evidence")
     ))
@@ -63,7 +65,7 @@ export default function ChatMessage({ message, machineName, onOpenPdf }) {
           {isPending ? (
             <div className="d-flex align-items-center gap-2 text-muted py-2">
               <span className="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true" />
-              <span className="small">Retrieving relevant manual sections & synthesizing answer...</span>
+              <span className="small">Retrieving relevant manual sections & synthesizing answer with Gemini...</span>
             </div>
           ) : isInsufficient ? (
             <div className="alert alert-warning border border-warning d-flex align-items-start gap-2 mb-2 py-2">
@@ -89,7 +91,7 @@ export default function ChatMessage({ message, machineName, onOpenPdf }) {
               <div className="d-flex flex-column gap-1">
                 {citations.map((citation, idx) => (
                   <CitationCard
-                    key={citation.id || `cit-${idx}`}
+                    key={citation.id || citation.source_id || `cit-${idx}`}
                     citation={citation}
                     onOpenPdf={onOpenPdf}
                   />

@@ -41,17 +41,18 @@ export default function EngineerDashboard() {
     scrollToBottom();
   }, [messages, isSending]);
 
-  // Load machines on mount
+  // Load assigned machines on mount
   useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
       setError(null);
       try {
         const list = await machineService.getMachines();
-        setMachines(list);
-        if (list.length > 0) {
+        const validList = Array.isArray(list) ? list : [];
+        setMachines(validList);
+        if (validList.length > 0) {
           // Pre-select first machine by default
-          setSelectedMachineId(String(list[0].id));
+          setSelectedMachineId(String(validList[0].id));
         }
       } catch (err) {
         setError(getErrorMessage(err, 'Unable to connect to the server. Please check your connection and try again.'));
@@ -76,7 +77,6 @@ export default function EngineerDashboard() {
       try {
         const history = await chatService.getChatHistory(selectedMachineId);
         setHistoryItems(history);
-        // Pre-populate chat thread with previous machine QA
         setMessages(history);
       } catch (err) {
         console.error('Failed to load machine chat history:', err);
@@ -89,7 +89,10 @@ export default function EngineerDashboard() {
   }, [selectedMachineId]);
 
   const handleSelectMachine = (newMachineId) => {
+    if (newMachineId === selectedMachineId) return;
     setSelectedMachineId(newMachineId);
+    setMessages([]);
+    setHistoryItems([]);
     setError(null);
   };
 
@@ -155,7 +158,7 @@ export default function EngineerDashboard() {
   const currentMachine = machines.find((m) => String(m.id) === String(selectedMachineId));
 
   if (isLoadingMachines) {
-    return <LoadingSpinner text="Loading machines and technical indexes..." size="lg" />;
+    return <LoadingSpinner text="Loading assigned machines and technical indexes..." size="lg" />;
   }
 
   return (
@@ -186,7 +189,7 @@ export default function EngineerDashboard() {
         {/* Left Side: Chat Conversation Area */}
         <div className="col-lg-9 col-12 d-flex flex-column">
           <div
-            className="card card-industrial flex-grow-1 d-flex flex-column p-0 bg-white"
+            className="card card-industrial flex-grow-1 d-flex flex-column p-0 bg-white shadow-sm"
             style={{ minHeight: '520px', maxHeight: '72vh' }}
           >
             {/* Chat scrollable body */}
@@ -201,7 +204,7 @@ export default function EngineerDashboard() {
                 <LoadingSpinner text="Retrieving previous manual inquiries..." />
               ) : messages.length === 0 ? (
                 <EmptyState
-                  title={`Ready for questions on ${currentMachine?.name}`}
+                  title={`Ready for questions on ${currentMachine?.name || 'Machine'}`}
                   description="Ask about operating parameters, torque tolerances, fault troubleshooting, or safety procedures directly verified by the uploaded manuals."
                   icon={MessageSquare}
                 />
@@ -221,7 +224,7 @@ export default function EngineerDashboard() {
             {/* Bottom Input Area */}
             <ChatInput
               onSendMessage={handleSendMessage}
-              disabled={!selectedMachineId}
+              disabled={!selectedMachineId || isSending}
               isSending={isSending}
             />
           </div>
@@ -229,10 +232,10 @@ export default function EngineerDashboard() {
 
         {/* Right Side: Previous Questions Quick Sidebar */}
         <div className="col-lg-3 col-12 d-none d-lg-block">
-          <div className="card card-industrial p-3 h-100 bg-white d-flex flex-column" style={{ maxHeight: '72vh' }}>
+          <div className="card card-industrial p-3 h-100 bg-white d-flex flex-column shadow-sm" style={{ maxHeight: '72vh' }}>
             <div className="d-flex align-items-center justify-content-between pb-2 mb-2 border-bottom">
               <span className="fw-semibold small text-dark d-flex align-items-center gap-1">
-                <History size={14} className="text-secondary" /> Machine Inquiries
+                <History size={14} className="text-secondary" /> Personal Query History
               </span>
               <span className="badge bg-light text-secondary border small">
                 {historyItems.length}
@@ -248,9 +251,6 @@ export default function EngineerDashboard() {
                     key={item.id}
                     className="p-2 mb-2 rounded bg-light border text-start cursor-pointer hover-shadow"
                     style={{ cursor: 'pointer' }}
-                    onClick={() => {
-                      // Scroll to or highlight the question
-                    }}
                   >
                     <div className="fw-medium text-dark text-truncate small" style={{ fontSize: '0.8rem' }}>
                       {item.question}

@@ -54,7 +54,8 @@ export const documentService = {
     try {
       let response;
       try {
-        response = await apiClient.post('/documents/upload/', formData, {
+        // Direct DRF DocumentViewSet create endpoint
+        response = await apiClient.post('/documents/', formData, {
           headers: {
             'Content-Type': 'multipart/form-data'
           },
@@ -62,7 +63,7 @@ export const documentService = {
         });
       } catch (err404) {
         if (err404.response && (err404.response.status === 404 || err404.response.status === 405)) {
-          response = await apiClient.post('/documents/', formData, {
+          response = await apiClient.post('/documents/upload/', formData, {
             headers: {
               'Content-Type': 'multipart/form-data'
             },
@@ -80,23 +81,20 @@ export const documentService = {
         const file = formData.get('file');
         const machineId = formData.get('machine_id') || formData.get('machine');
         const title = formData.get('title') || file?.name || 'Uploaded Manual';
-        const manualType = formData.get('manual_type') || 'Operations Manual';
         const modelNumber = formData.get('model_number') || 'N/A';
         const revision = formData.get('revision') || 'Rev 1.0';
 
         const newDoc = {
-          id: Date.now(),
-          machine_id: Number(machineId),
+          id: 'doc-mock-' + Date.now(),
+          machine_id: machineId,
           machine_name: 'Machine #' + machineId,
           title,
-          manual_type: manualType,
           model_number: modelNumber,
           revision,
-          file_name: file ? file.name : 'manual.pdf',
+          original_filename: file ? file.name : 'manual.pdf',
           file_size: file ? file.size : 1024000,
-          status: 'Uploaded', // Initially Uploaded, backend worker will change to Indexed
-          created_at: new Date().toISOString(),
-          pdf_url: null
+          status: 'READY',
+          created_at: new Date().toISOString()
         };
         mockDocumentsState = [newDoc, ...mockDocumentsState];
         return newDoc;
@@ -106,32 +104,95 @@ export const documentService = {
   },
 
   /**
-   * Fetch protected PDF binary or URL for viewing
+   * Trigger ChromaDB vector indexing for an extracted PDF document
+   * @param {string} docId
    */
-  async getDocumentPdfUrl(docId) {
+  async indexDocument(docId) {
+    const response = await apiClient.post(`/documents/${docId}/index/`);
+    return response.data;
+  },
+
+  /**
+   * Fetch current ChromaDB indexing status for a document
+   * @param {string} docId
+   */
+  async getIndexStatus(docId) {
+    const response = await apiClient.get(`/documents/${docId}/index-status/`);
+    return response.data;
+  },
+
+  /**
+   * Fetch protected PDF binary as ArrayBuffer for PDF.js rendering
+   * @param {string} docId
+   * @returns {Promise<ArrayBuffer>}
+   */
+  async getDocumentPdfBinary(docId) {
     try {
-      // First attempt to get the protected PDF binary stream with auth header
       let response;
       try {
         response = await apiClient.get(`/documents/${docId}/pdf/`, {
+          responseType: 'arraybuffer'
+        });
+      } catch (errFallback) {
+        if (errFallback.response && (errFallback.response.status === 404 || errFallback.response.status === 405)) {
+          response = await apiClient.get(`/documents/${docId}/download/`, {
+            responseType: 'arraybuffer'
+          });
+        } else {
+          throw errFallback;
+        }
+      }
+      return response.data;
+    } catch (err) {
+      const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
+      if (USE_MOCK_FALLBACK && isNetworkError) {
+        console.warn('[documentService] Backend offline, returning empty buffer for mock preview');
+        return new ArrayBuffer(0);
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * Delete a technical manual document and clean up its vector index
+   * @param {string} docId
+   * @param {boolean} permanent
+   */
+  async deleteDocument(docId, permanent = true) {
+    const response = await apiClient.delete(`/documents/${docId}/`, {
+      params: permanent ? { permanent: 'true' } : {}
+    });
+    return response.data;
+  },
+
+  /**
+   * Fetch protected PDF binary stream or blob URL for viewing
+   * @param {string} docId
+   */
+  async getDocumentPdfUrl(docId) {
+    try {
+      let response;
+      try {
+        // Preferred authenticated PDF streaming endpoint
+        response = await apiClient.get(`/documents/${docId}/pdf/`, {
           responseType: 'blob'
         });
-      } catch (err404) {
-        if (err404.response && (err404.response.status === 404 || err404.response.status === 405)) {
+      } catch (errFallback) {
+        if (errFallback.response && (errFallback.response.status === 404 || errFallback.response.status === 405)) {
           response = await apiClient.get(`/documents/${docId}/download/`, {
             responseType: 'blob'
           });
         } else {
-          throw err404;
+          throw errFallback;
         }
       }
+
       const blob = new Blob([response.data], { type: 'application/pdf' });
       return URL.createObjectURL(blob);
     } catch (err) {
       const isNetworkError = !err.response || err.code === 'ERR_NETWORK';
       if (USE_MOCK_FALLBACK && isNetworkError) {
         console.warn('[documentService] Returning placeholder sample PDF for viewer demo');
-        // Return a reliable data URI or empty pdf blob for demo if backend is offline
         return null;
       }
       throw err;

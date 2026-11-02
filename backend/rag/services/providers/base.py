@@ -76,6 +76,13 @@ class BaseEmbeddingProvider(ABC):
         """Generates an embedding vector for a single text chunk."""
         pass
 
+    def embed_query(self, query: str) -> List[float]:
+        """
+        Generates an embedding vector for a retrieval search query.
+        Defaults to embed_text unless overridden by provider-specific query formatting.
+        """
+        return self.embed_text(query)
+
     @abstractmethod
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Generates embedding vectors for a batch of text chunks."""

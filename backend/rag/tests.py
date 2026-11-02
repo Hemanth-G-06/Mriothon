@@ -649,3 +649,815 @@ class ReindexManagementCommandTestCase(TestCase):
             call_command('reindex_documents', all=True, force=True, stdout=self.out)
             output = self.out.getvalue()
             self.assertIn("Successfully indexed: 1", output)
+
+
+# ==============================================================================
+# 7. Semantic Retrieval & Grounded Generation Tests (TASK 06)
+# ==============================================================================
+
+from rag.services.llm.base import BaseLLMProvider, LLMResult
+from rag.services.retrieval_service import (
+    SemanticRetrievalService,
+    RetrievedChunkContext,
+    MachineAccessDeniedError,
+    MachineInactiveError,
+    MachineNotFoundError,
+)
+from rag.services.generation_service import (
+    GroundedAnswerGenerationService,
+    EXACT_ABSTENTION_MESSAGE,
+)
+
+
+class MockLLMProvider(BaseLLMProvider):
+    """
+    Mock LLM provider returning predetermined answer text.
+    """
+    def __init__(self, answer_text="Grounding verified answer.", model_identifier="mock-llm"):
+        super().__init__(model_identifier=model_identifier, timeout=5)
+        self.answer_text = answer_text
+
+    def generate_chat_completion(self, system_instruction: str, user_prompt: str, max_tokens: int = 1000) -> LLMResult:
+        return LLMResult(raw_text=self.answer_text, model_identifier=self.model_identifier)
+
+
+class SemanticRetrievalTestCase(TestCase):
+    """
+    Tests machine-isolated semantic retrieval, Neon record resolution,
+    and access boundary enforcement.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.chroma_service = ChromaService(
+            persist_directory=Path(self.temp_dir.name),
+            collection_name="test_retrieval_service"
+        )
+        self.mock_provider = MockEmbeddingProvider()
+        self.retrieval_service = SemanticRetrievalService(
+            embedding_provider=self.mock_provider,
+            chroma_service=self.chroma_service,
+        )
+
+        self.admin = User.objects.create_user(email="admin_ret@test.com", password="pass", role=UserRole.ADMIN)
+        self.engineer = User.objects.create_user(email="eng_ret@test.com", password="pass", role=UserRole.ENGINEER)
+        self.unassigned_engineer = User.objects.create_user(email="uneng_ret@test.com", password="pass", role=UserRole.ENGINEER)
+
+        self.machine1 = Machine.objects.create(machine_code="ROBOT-M1", name="Robot 1", created_by=self.admin)
+        self.machine2 = Machine.objects.create(machine_code="ROBOT-M2", name="Robot 2", created_by=self.admin)
+        self.inactive_machine = Machine.objects.create(
+            machine_code="INACT-01",
+            name="Inactive Machine",
+            status=MachineStatus.INACTIVE,
+            created_by=self.admin
+        )
+
+        MachineAssignment.objects.create(machine=self.machine1, user=self.engineer, is_active=True, assigned_by=self.admin)
+
+        # Document and Chunks for Machine 1
+        self.doc1 = Document.objects.create(
+            machine=self.machine1,
+            title="Robot 1 Manual",
+            original_filename="r1.pdf",
+            checksum="1" * 64,
+            status=DocumentStatus.READY
+        )
+        self.page1 = DocumentPage.objects.create(
+            document=self.doc1,
+            page_number=5,
+            text="Hydraulic filter replacement procedure: Unscrew cap with 24mm wrench.",
+            character_count=71
+        )
+        self.chunk1 = DocumentChunk.objects.create(
+            document=self.doc1,
+            page=self.page1,
+            chunk_index=0,
+            text=self.page1.text,
+            token_count=10,
+            chroma_vector_id=f"doc_{self.doc1.id}_p5_c0",
+            embedding_model="mock-model-v1"
+        )
+
+        # Index chunk in ChromaDB
+        self.chroma_service.upsert_chunks(
+            chunk_records=[{
+                "id": self.chunk1.chroma_vector_id,
+                "text": self.chunk1.text,
+                "embedding": [0.123] * 8,
+                "metadata": {
+                    "document_id": str(self.doc1.id),
+                    "machine_id": str(self.machine1.id),
+                    "document_page_id": self.page1.id,
+                    "page_number": 5,
+                    "chunk_index": 0,
+                    "embedding_model": "mock-model-v1",
+                }
+            }],
+            embedding_model="mock-model-v1"
+        )
+
+    def tearDown(self):
+        try:
+            self.temp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_successful_retrieval_for_assigned_engineer(self):
+        results = self.retrieval_service.retrieve_context(
+            user=self.engineer,
+            machine_id=str(self.machine1.id),
+            question="How do I replace the hydraulic filter?"
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].document_title, "Robot 1 Manual")
+        self.assertEqual(results[0].page_number, 5)
+        self.assertIn("24mm wrench", results[0].chunk_text)
+
+    def test_unassigned_engineer_denied(self):
+        from rag.services.retrieval_service import MachineAccessDeniedError
+        with self.assertRaises(MachineAccessDeniedError):
+            self.retrieval_service.retrieve_context(
+                user=self.unassigned_engineer,
+                machine_id=str(self.machine1.id),
+                question="Filter replacement"
+            )
+
+    def test_inactive_machine_rejected(self):
+        from rag.services.retrieval_service import MachineInactiveError
+        with self.assertRaises(MachineInactiveError):
+            self.retrieval_service.retrieve_context(
+                user=self.admin,
+                machine_id=str(self.inactive_machine.id),
+                question="Filter replacement"
+            )
+
+    def test_machine_isolation_returns_empty_when_no_manuals_for_machine(self):
+        """Querying Machine 2 must not return chunks belonging to Machine 1."""
+        results = self.retrieval_service.retrieve_context(
+            user=self.admin,
+            machine_id=str(self.machine2.id),
+            question="How do I replace the hydraulic filter?"
+        )
+        self.assertEqual(len(results), 0)
+
+
+class GroundedAnswerGenerationTestCase(TestCase):
+    """
+    Tests strict prompt grounding, citation validation, and canonical abstention.
+    """
+
+    def setUp(self):
+        from rag.services.retrieval_service import RetrievedChunkContext
+        self.chunk_ctx = RetrievedChunkContext(
+            source_id="DOC-9B1DEB-P5-C0",
+            document_id=str(uuid.uuid4()),
+            document_title="Hydraulic Manual",
+            original_filename="manual.pdf",
+            machine_id=str(uuid.uuid4()),
+            page_number=5,
+            chunk_index=0,
+            chunk_text="Turn clockwise to open valve V-1.",
+            similarity_score=0.95,
+            chroma_vector_id="v1"
+        )
+
+    def test_supported_question_generates_grounded_answer(self):
+        from rag.services.generation_service import GroundedAnswerGenerationService
+        mock_llm = MockLLMProvider(
+            answer_text="ANSWER: To open the valve, turn clockwise [DOC-9B1DEB-P5-C0].\nSOURCES: [DOC-9B1DEB-P5-C0]"
+        )
+        service = GroundedAnswerGenerationService(llm_provider=mock_llm)
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-1",
+            question="How to open valve?",
+            retrieved_chunks=[self.chunk_ctx]
+        )
+        self.assertFalse(result.abstained)
+        self.assertIn("turn clockwise", result.answer)
+        self.assertEqual(len(result.citations), 1)
+        self.assertEqual(result.citations[0]["page_number"], 5)
+        self.assertEqual(result.citations[0]["document_title"], "Hydraulic Manual")
+
+    def test_unsupported_question_abstains_with_exact_canonical_message(self):
+        from rag.services.generation_service import GroundedAnswerGenerationService, EXACT_ABSTENTION_MESSAGE
+        mock_llm = MockLLMProvider(
+            answer_text=f"ANSWER: {EXACT_ABSTENTION_MESSAGE}\nSOURCES: []"
+        )
+        service = GroundedAnswerGenerationService(llm_provider=mock_llm)
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-1",
+            question="What is the tire pressure?",
+            retrieved_chunks=[self.chunk_ctx]
+        )
+        self.assertTrue(result.abstained)
+        self.assertEqual(result.answer, EXACT_ABSTENTION_MESSAGE)
+        self.assertEqual(result.citations, [])
+
+    def test_empty_retrieved_context_abstains_immediately(self):
+        from rag.services.generation_service import GroundedAnswerGenerationService, EXACT_ABSTENTION_MESSAGE
+        service = GroundedAnswerGenerationService(llm_provider=MockLLMProvider())
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-1",
+            question="Any question?",
+            retrieved_chunks=[]
+        )
+        self.assertTrue(result.abstained)
+        self.assertEqual(result.answer, EXACT_ABSTENTION_MESSAGE)
+        self.assertEqual(result.citations, [])
+
+    def test_filters_hallucinated_citations(self):
+        """Hallucinated source IDs not present in retrieved context must be discarded."""
+        from rag.services.generation_service import GroundedAnswerGenerationService
+        mock_llm = MockLLMProvider(
+            answer_text="ANSWER: Procedure.\nSOURCES: [DOC-9B1DEB-P5-C0, DOC-FABRICATED-P99-C9]"
+        )
+        service = GroundedAnswerGenerationService(llm_provider=mock_llm)
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-1",
+            question="Procedure?",
+            retrieved_chunks=[self.chunk_ctx]
+        )
+        self.assertEqual(len(result.citations), 1)
+        self.assertEqual(result.citations[0]["source_id"], "DOC-9B1DEB-P5-C0")
+
+
+class RagQueryAPITestCase(APITestCase):
+    """
+    Tests POST /api/rag/query/ endpoint across roles, validations, and failures.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.chroma_service = ChromaService(
+            persist_directory=Path(self.temp_dir.name),
+            collection_name="test_api_query"
+        )
+        self.mock_provider = MockEmbeddingProvider()
+
+        self.admin = User.objects.create_user(email="admin_q@test.com", password="password123", role=UserRole.ADMIN)
+        self.supervisor = User.objects.create_user(email="sup_q@test.com", password="password123", role=UserRole.SUPERVISOR)
+        self.eng_assigned = User.objects.create_user(email="eng_ass@test.com", password="password123", role=UserRole.ENGINEER)
+        self.eng_unassigned = User.objects.create_user(email="eng_unass@test.com", password="password123", role=UserRole.ENGINEER)
+
+        self.machine = Machine.objects.create(machine_code="CNC-Q01", name="CNC Machine", created_by=self.admin)
+        self.inactive_machine = Machine.objects.create(
+            machine_code="CNC-INACT",
+            name="CNC Inactive",
+            status=MachineStatus.INACTIVE,
+            created_by=self.admin
+        )
+        MachineAssignment.objects.create(machine=self.machine, user=self.eng_assigned, is_active=True, assigned_by=self.admin)
+
+        self.doc = Document.objects.create(
+            machine=self.machine,
+            title="CNC Technical Guide",
+            original_filename="guide.pdf",
+            checksum="9" * 64,
+            status=DocumentStatus.READY
+        )
+        self.page = DocumentPage.objects.create(
+            document=self.doc,
+            page_number=12,
+            text="Lubricate spindle every 40 hours using ISO VG 68 synthetic oil.",
+            character_count=67
+        )
+        self.chunk = DocumentChunk.objects.create(
+            document=self.doc,
+            page=self.page,
+            chunk_index=0,
+            text=self.page.text,
+            token_count=12,
+            chroma_vector_id=f"doc_{self.doc.id}_p12_c0",
+            embedding_model="mock-model-v1"
+        )
+
+        self.chroma_service.upsert_chunks(
+            chunk_records=[{
+                "id": self.chunk.chroma_vector_id,
+                "text": self.chunk.text,
+                "embedding": [0.1] * 8,
+                "metadata": {
+                    "document_id": str(self.doc.id),
+                    "machine_id": str(self.machine.id),
+                    "document_page_id": self.page.id,
+                    "page_number": 12,
+                    "chunk_index": 0,
+                    "embedding_model": "mock-model-v1",
+                }
+            }],
+            embedding_model="mock-model-v1"
+        )
+        self.url = reverse('rag:rag-query')
+
+    def tearDown(self):
+        try:
+            self.temp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_unauthenticated_request_rejected(self):
+        response = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Lubrication?"})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_empty_question_rejected(self):
+        self.client.force_authenticate(user=self.eng_assigned)
+        response = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "  "})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_inactive_machine_rejected(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(self.url, {"machine_id": str(self.inactive_machine.id), "question": "Lubrication?"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unassigned_engineer_forbidden(self):
+        self.client.force_authenticate(user=self.eng_unassigned)
+        response = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Lubrication?"})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('rag.views.get_retrieval_service')
+    @patch('rag.views.GroundedAnswerGenerationService')
+    def test_assigned_engineer_receives_grounded_answer(self, MockGen, MockGetSvc):
+        MockRet = MockGetSvc.return_value
+        from rag.services.generation_service import GroundedAnswer
+        from rag.services.retrieval_service import RetrievedChunkContext
+
+        MockRet.return_value.retrieve_context.return_value = [
+            RetrievedChunkContext(
+                source_id="DOC-999999-P12-C0",
+                document_id=str(self.doc.id),
+                document_title="CNC Technical Guide",
+                original_filename="guide.pdf",
+                machine_id=str(self.machine.id),
+                page_number=12,
+                chunk_index=0,
+                chunk_text="Lubricate spindle every 40 hours using ISO VG 68.",
+                similarity_score=0.98,
+                chroma_vector_id="v1"
+            )
+        ]
+        MockGen.return_value.generate_answer.return_value = GroundedAnswer(
+            answer="Lubricate the spindle every 40 hours with ISO VG 68 oil.",
+            citations=[{
+                "document_id": str(self.doc.id),
+                "document_title": "CNC Technical Guide",
+                "page_number": 12,
+                "source_id": "DOC-999999-P12-C0"
+            }],
+            abstained=False
+        )
+
+        self.client.force_authenticate(user=self.eng_assigned)
+        response = self.client.post(self.url, {
+            "machine_id": str(self.machine.id),
+            "question": "How often should I lubricate the spindle?"
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["abstained"])
+        self.assertIn("40 hours", response.data["answer"])
+        self.assertEqual(len(response.data["citations"]), 1)
+        self.assertEqual(response.data["citations"][0]["page_number"], 12)
+
+    @patch('rag.views.get_retrieval_service')
+    @patch('rag.views.GroundedAnswerGenerationService')
+    def test_supervisor_and_admin_can_query_any_machine(self, MockGen, MockGetSvc):
+        MockRet = MockGetSvc.return_value
+        from rag.services.generation_service import GroundedAnswer
+        MockGen.return_value.generate_answer.return_value = GroundedAnswer(
+            answer="Answer.", citations=[], abstained=False
+        )
+        MockRet.return_value.retrieve_context.return_value = []
+
+        # Supervisor
+        self.client.force_authenticate(user=self.supervisor)
+        resp_sup = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Question?"})
+        self.assertEqual(resp_sup.status_code, status.HTTP_200_OK)
+
+        # Admin
+        self.client.force_authenticate(user=self.admin)
+        resp_admin = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Question?"})
+        self.assertEqual(resp_admin.status_code, status.HTTP_200_OK)
+
+    @patch('rag.views.get_retrieval_service')
+    def test_provider_failure_returns_503(self, MockGetSvc):
+        from rag.services.providers.base import EmbeddingTimeoutError
+        mock_svc = MockGetSvc.return_value
+        mock_svc.retrieve_context.side_effect = EmbeddingTimeoutError("Embedding service timed out")
+
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Question?"})
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn("RAG pipeline service error", response.data["error"])
+
+    @patch('rag.views.get_retrieval_service')
+    @patch('rag.views.GroundedAnswerGenerationService')
+    def test_llm_rate_limit_returns_503_with_category(self, MockGen, MockGetSvc):
+        from rag.services.llm.base import LLMRateLimitError
+        MockGetSvc.return_value.retrieve_context.return_value = []
+        MockGen.return_value.generate_answer.side_effect = LLMRateLimitError("Rate limit 429")
+
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.post(self.url, {"machine_id": str(self.machine.id), "question": "Question?"})
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn("RAG pipeline service error", response.data["error"])
+        self.assertEqual(response.data.get("error_type"), "llm_rate_limit")
+
+
+# ==============================================================================
+# 8. Google Gemini LLM Provider & Architecture Tests (TASK 1)
+# ==============================================================================
+
+from unittest.mock import patch, MagicMock
+from django.conf import settings
+from google.genai import errors
+from rag.services.llm.base import (
+    BaseLLMProvider,
+    LLMProviderError,
+    LLMConfigurationError,
+    LLMAuthenticationError,
+    LLMTimeoutError,
+    LLMRateLimitError,
+    LLMQuotaExhaustedError,
+    LLMModelUnavailableError,
+    LLMResponseMalformedError,
+    LLMResult,
+)
+from rag.services.llm.gemini import GeminiLLMProvider
+from rag.services.llm.factory import get_llm_provider
+from rag.services.llm.lm_studio import LMStudioLLMProvider
+from rag.services.generation_service import (
+    GroundedAnswerGenerationService,
+    EXACT_ABSTENTION_MESSAGE,
+)
+
+
+class GeminiLLMProviderTestCase(TestCase):
+    """
+    Tests Google Gemini API adapter configuration, error translations,
+    and structured output extraction.
+    """
+
+    def setUp(self):
+        self.api_key = "AIzaSyFakeTestGeminiApiKey_12345678"
+        self.provider = GeminiLLMProvider(
+            api_key=self.api_key,
+            model_identifier="gemini-2.5-flash",
+            timeout=30,
+            temperature=0.2,
+        )
+
+    def test_gemini_adapter_configuration_success(self):
+        """Adapter correctly initializes with explicit configuration."""
+        self.assertEqual(self.provider.get_model_identifier(), "gemini-2.5-flash")
+        self.assertEqual(self.provider.timeout, 30)
+        self.assertEqual(self.provider.temperature, 0.2)
+        self.assertEqual(self.provider.api_key, self.api_key)
+
+    def test_missing_api_key_raises_configuration_error(self):
+        """Missing or blank API key must raise LLMConfigurationError."""
+        with self.assertRaises(LLMConfigurationError) as ctx:
+            GeminiLLMProvider(api_key="")
+        self.assertIn("GEMINI_API_KEY is not configured", str(ctx.exception))
+
+        with self.assertRaises(LLMConfigurationError):
+            GeminiLLMProvider(api_key="   ")
+
+    @patch('google.genai.Client')
+    def test_successful_gemini_completion(self, MockClient):
+        """Standard successful completion returns normalized LLMResult."""
+        mock_instance = MockClient.return_value
+        mock_response = MagicMock()
+        mock_response.text = "ANSWER: Turn the emergency valve clockwise.\nSOURCES: [DOC-A1-P2-C0]"
+        mock_instance.models.generate_content.return_value = mock_response
+
+        result = self.provider.generate_chat_completion(
+            system_instruction="System rules",
+            user_prompt="User question",
+            max_tokens=500,
+        )
+
+        self.assertIsInstance(result, LLMResult)
+        self.assertEqual(result.model_identifier, "gemini-2.5-flash")
+        self.assertIn("emergency valve clockwise", result.raw_text)
+
+    @patch('google.genai.Client')
+    def test_invalid_api_key_handling(self, MockClient):
+        """403 or invalid API key error from Gemini translates to LLMAuthenticationError."""
+        mock_instance = MockClient.return_value
+        mock_instance.models.generate_content.side_effect = errors.APIError(
+            403, {"error": {"message": "API key not valid. Please pass a valid API key."}}
+        )
+
+        with self.assertRaises(LLMAuthenticationError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("authentication failed", str(ctx.exception).lower())
+
+    @patch('google.genai.Client')
+    def test_provider_timeout_handling(self, MockClient):
+        """Timeout during Gemini call translates to LLMTimeoutError."""
+        mock_instance = MockClient.return_value
+        mock_instance.models.generate_content.side_effect = TimeoutError("Request timed out")
+
+        with self.assertRaises(LLMTimeoutError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("timed out", str(ctx.exception).lower())
+
+    @patch('google.genai.Client')
+    def test_provider_rate_limit_handling(self, MockClient):
+        """429 rate limit translates to LLMRateLimitError."""
+        mock_instance = MockClient.return_value
+        mock_instance.models.generate_content.side_effect = errors.APIError(
+            429, {"error": {"message": "Rate limit exceeded. Please try again later."}}
+        )
+
+        with self.assertRaises(LLMRateLimitError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("rate limit exceeded", str(ctx.exception).lower())
+
+    @patch('google.genai.Client')
+    def test_provider_quota_exhausted_handling(self, MockClient):
+        """429 quota exhaustion translates to LLMQuotaExhaustedError."""
+        mock_instance = MockClient.return_value
+        mock_instance.models.generate_content.side_effect = errors.APIError(
+            429, {"error": {"message": "Quota exceeded for quota metric 'GenerateContentRequests'."}}
+        )
+
+        with self.assertRaises(LLMQuotaExhaustedError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("quota has been exhausted", str(ctx.exception).lower())
+
+    @patch('google.genai.Client')
+    def test_model_unavailable_error_handling(self, MockClient):
+        """404 model not found translates to LLMModelUnavailableError."""
+        mock_instance = MockClient.return_value
+        mock_instance.models.generate_content.side_effect = errors.APIError(
+            404, {"error": {"message": "models/nonexistent-model is not found for API version v1beta"}}
+        )
+
+        with self.assertRaises(LLMModelUnavailableError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("unavailable or not found", str(ctx.exception).lower())
+
+    @patch('google.genai.Client')
+    def test_malformed_empty_model_response_handling(self, MockClient):
+        """Empty or None text response translates to LLMResponseMalformedError."""
+        mock_instance = MockClient.return_value
+        mock_response = MagicMock()
+        mock_response.text = None
+        mock_instance.models.generate_content.return_value = mock_response
+
+        with self.assertRaises(LLMResponseMalformedError) as ctx:
+            self.provider.generate_chat_completion(
+                system_instruction="Rules", user_prompt="Question"
+            )
+        self.assertIn("empty or unparseable", str(ctx.exception).lower())
+
+
+class LLMProviderArchitectureTestCase(TestCase):
+    """
+    Tests provider resolution, environment configuration, citation integrity,
+    and ensures NO implicit fallback to LM Studio / Qwen occurs.
+    """
+
+    def test_provider_factory_defaults_to_gemini(self):
+        """Default provider in get_llm_provider is Gemini."""
+        with patch.object(settings, 'LLM_PROVIDER', 'gemini'), \
+             patch.object(settings, 'GEMINI_API_KEY', 'fake_key_123'), \
+             patch.object(settings, 'GEMINI_MODEL', 'gemini-2.5-flash'):
+            provider = get_llm_provider()
+            self.assertIsInstance(provider, GeminiLLMProvider)
+            self.assertEqual(provider.get_model_identifier(), "gemini-2.5-flash")
+
+    def test_provider_factory_rejects_missing_gemini_key(self):
+        """Factory raises LLMConfigurationError if GEMINI_API_KEY is missing when selecting Gemini."""
+        with patch.object(settings, 'LLM_PROVIDER', 'gemini'),              patch.object(settings, 'GEMINI_API_KEY', ''):
+            with self.assertRaises(LLMConfigurationError):
+                get_llm_provider()
+
+    def test_ensuring_qwen_lm_studio_is_not_implicit_fallback(self):
+        """
+        When Gemini fails (e.g. network timeout or invalid key), the error must be propagated.
+        The system must NEVER silently fallback to LM Studio / Qwen.
+        """
+        mock_gemini = MagicMock(spec=GeminiLLMProvider)
+        mock_gemini.generate_chat_completion.side_effect = LLMAuthenticationError(
+            "Gemini authentication failed"
+        )
+
+        service = GroundedAnswerGenerationService(llm_provider=mock_gemini)
+
+        chunk = MagicMock()
+        chunk.source_id = "DOC-A-P1-C0"
+        chunk.document_id = "doc-1"
+        chunk.document_title = "Title"
+        chunk.page_number = 1
+        chunk.chunk_text = "Content"
+
+        with self.assertRaises(LLMAuthenticationError):
+            service.generate_answer(
+                machine_name="Press",
+                machine_code="P-01",
+                question="Operating pressure?",
+                retrieved_chunks=[chunk]
+            )
+
+    def test_explicit_lm_studio_only_when_requested(self):
+        """LM Studio is only instantiated when explicitly requested by name."""
+        provider = get_llm_provider(provider_name="lm_studio")
+        self.assertIsInstance(provider, LMStudioLLMProvider)
+
+    def test_unsupported_provider_raises_configuration_error(self):
+        """Requesting an unknown provider raises LLMConfigurationError."""
+        with self.assertRaises(LLMConfigurationError):
+            get_llm_provider(provider_name="unsupported_provider_xyz")
+
+    def test_fabricated_citations_are_strictly_rejected(self):
+        """Fabricated citations return empty citations and never attach arbitrary fallbacks."""
+        mock_llm = MagicMock(spec=BaseLLMProvider)
+        mock_llm.generate_chat_completion.return_value = LLMResult(
+            raw_text="ANSWER: Pressure is 10 bar.\nSOURCES: [DOC-FAKE-P99-C99]",
+            model_identifier="gemini-2.5-flash"
+        )
+        service = GroundedAnswerGenerationService(llm_provider=mock_llm)
+
+        real_chunk = MagicMock()
+        real_chunk.source_id = "DOC-REAL-P1-C0"
+        real_chunk.document_id = "doc-real"
+        real_chunk.document_title = "Real Manual"
+        real_chunk.page_number = 1
+        real_chunk.chunk_text = "Real content."
+
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-01",
+            question="Pressure?",
+            retrieved_chunks=[real_chunk]
+        )
+        self.assertFalse(result.abstained)
+        self.assertEqual(result.citations, [], "Fabricated citation must not be attached!")
+
+    def test_abstention_strict_zero_citations(self):
+        """When LLM abstains, citations must strictly be empty."""
+        mock_llm = MagicMock(spec=BaseLLMProvider)
+        mock_llm.generate_chat_completion.return_value = LLMResult(
+            raw_text=f"ANSWER: {EXACT_ABSTENTION_MESSAGE}\nSOURCES: [DOC-REAL-P1-C0]",
+            model_identifier="gemini-2.5-flash"
+        )
+        service = GroundedAnswerGenerationService(llm_provider=mock_llm)
+
+        real_chunk = MagicMock()
+        real_chunk.source_id = "DOC-REAL-P1-C0"
+        real_chunk.document_id = "doc-real"
+        real_chunk.document_title = "Real Manual"
+        real_chunk.page_number = 1
+        real_chunk.chunk_text = "Real content."
+
+        result = service.generate_answer(
+            machine_name="Robot",
+            machine_code="ROB-01",
+            question="Unsupported question?",
+            retrieved_chunks=[real_chunk]
+        )
+        self.assertTrue(result.abstained)
+        self.assertEqual(result.answer, EXACT_ABSTENTION_MESSAGE)
+        self.assertEqual(result.citations, [], "Abstention must have zero citations!")
+
+
+
+# ==============================================================================
+# 9. PostgreSQL + pgvector Indexing & Retrieval Tests
+# ==============================================================================
+
+from django.test import override_settings
+from rag.services.pgvector_retrieval_service import PgvectorRetrievalService
+from rag.services.retrieval_service import get_retrieval_service
+
+
+@override_settings(VECTOR_BACKEND='pgvector')
+class PgvectorIndexingAndRetrievalTestCase(TestCase):
+    """
+    Tests end-to-end pgvector indexing, exact cosine-distance retrieval,
+    machine isolation, and exclusion of invalidated/unembedded chunks.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email="pgv_admin@test.com", password="password123", role=UserRole.ADMIN
+        )
+        self.eng1 = User.objects.create_user(
+            email="pgv_eng1@test.com", password="password123", role=UserRole.ENGINEER
+        )
+        self.eng2 = User.objects.create_user(
+            email="pgv_eng2@test.com", password="password123", role=UserRole.ENGINEER
+        )
+
+        self.machine_hp200 = Machine.objects.create(
+            machine_code="PGV-HP200", name="HP-200 Hydraulic Press", created_by=self.admin
+        )
+        self.machine_ac90 = Machine.objects.create(
+            machine_code="PGV-AC90", name="AC-90 Air Compressor", created_by=self.admin
+        )
+
+        MachineAssignment.objects.create(
+            machine=self.machine_hp200, user=self.eng1, is_active=True, assigned_by=self.admin
+        )
+        MachineAssignment.objects.create(
+            machine=self.machine_ac90, user=self.eng2, is_active=True, assigned_by=self.admin
+        )
+
+        self.doc_hp200 = Document.objects.create(
+            machine=self.machine_hp200,
+            title="HP 200 Operations Manual",
+            original_filename="HP200_Operations_Rev1_0.pdf",
+            checksum="1" * 64,
+            status=DocumentStatus.READY,
+        )
+        DocumentPage.objects.create(
+            document=self.doc_hp200,
+            page_number=2,
+            text="Nominal operating hydraulic pressure is 120 to 140 bar. E17 low-pressure alarm triggers below 110 bar.",
+            character_count=102,
+        )
+
+        self.doc_ac90 = Document.objects.create(
+            machine=self.machine_ac90,
+            title="AC 90 Operations Manual",
+            original_filename="AC90_Operations_Maintenance_Rev1_0.pdf",
+            checksum="2" * 64,
+            status=DocumentStatus.READY,
+        )
+        DocumentPage.objects.create(
+            document=self.doc_ac90,
+            page_number=1,
+            text="AC-90 discharge air pressure is 7.5 to 8.5 bar. High discharge temperature shutdown at 110 C.",
+            character_count=93,
+        )
+
+        self.provider_768 = MockEmbeddingProvider(
+            model_identifier="text-embedding-nomic-embed-text-v1.5",
+            dimension=768,
+        )
+
+    def test_factory_returns_pgvector_retrieval_service(self):
+        svc = get_retrieval_service(embedding_provider=self.provider_768)
+        self.assertIsInstance(svc, PgvectorRetrievalService)
+
+    def test_pgvector_indexing_and_cosine_retrieval(self):
+        indexing_svc = DocumentIndexingService(
+            embedding_provider=self.provider_768,
+            vector_backend='pgvector',
+        )
+        idx_hp = indexing_svc.index_document(self.doc_hp200)
+        idx_ac = indexing_svc.index_document(self.doc_ac90)
+
+        self.assertEqual(idx_hp.status, IndexingStatus.READY)
+        self.assertEqual(idx_ac.status, IndexingStatus.READY)
+
+        hp_chunk = DocumentChunk.objects.get(document=self.doc_hp200)
+        self.assertIsNotNone(hp_chunk.embedding)
+        self.assertEqual(len(hp_chunk.embedding), 768)
+        self.assertIsNotNone(hp_chunk.embedding_updated_at)
+
+        retrieval_svc = get_retrieval_service(embedding_provider=self.provider_768)
+
+        # Assigned engineer retrieves HP-200 chunk with canonical page 2
+        results = retrieval_svc.retrieve_context(
+            user=self.eng1,
+            machine_id=str(self.machine_hp200.id),
+            question="What is the nominal operating hydraulic pressure?",
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].document_id, str(self.doc_hp200.id))
+        self.assertEqual(results[0].page_number, 2)
+        self.assertGreaterEqual(results[0].similarity_score, 0.99)
+
+        # Cross-machine authorization blocked for eng1 on AC-90
+        with self.assertRaises(MachineAccessDeniedError):
+            retrieval_svc.retrieve_context(
+                user=self.eng1,
+                machine_id=str(self.machine_ac90.id),
+                question="What is the discharge air pressure?",
+            )
+
+        # Invalidating DocumentIndex excludes chunks from pgvector retrieval
+        idx_hp.status = IndexingStatus.FAILED
+        idx_hp.save(update_fields=['status'])
+        results_after_invalidation = retrieval_svc.retrieve_context(
+            user=self.eng1,
+            machine_id=str(self.machine_hp200.id),
+            question="What is the nominal operating hydraulic pressure?",
+        )
+        self.assertEqual(results_after_invalidation, [])

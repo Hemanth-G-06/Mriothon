@@ -197,10 +197,14 @@ def get_accessible_documents_queryset(user, machine_id=None):
     elif user.role == UserRole.SUPERVISOR:
         qs = Document.objects.filter(machine__in=accessible_machines, is_active=True)
     elif user.role == UserRole.ENGINEER:
+        from rag.models import IndexingStatus
         qs = Document.objects.filter(
             machine__in=accessible_machines,
             machine__status='ACTIVE',
-            is_active=True
+            is_active=True,
+            status=DocumentStatus.READY
+        ).exclude(
+            index_record__status__in=[IndexingStatus.FAILED, IndexingStatus.PROCESSING]
         )
     else:
         return Document.objects.none()

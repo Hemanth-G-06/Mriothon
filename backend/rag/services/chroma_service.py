@@ -141,11 +141,23 @@ class ChromaService:
     def delete_document_vectors(self, document_id: str) -> None:
         """
         Deletes all vector embeddings associated with a given document.
-        Ensures clean, idempotent re-indexing.
+        Ensures clean, idempotent re-indexing and safe document deletion.
         """
         try:
             collection = self.get_or_create_collection()
             collection.delete(where={"document_id": str(document_id)})
+        except Exception:
+            # If collection is empty or not yet created, delete is a no-op
+            pass
+
+    def delete_machine_vectors(self, machine_id: str) -> None:
+        """
+        Deletes all vector embeddings associated with a given machine.
+        Ensures clean, isolated vector cleanup when a test machine is deleted.
+        """
+        try:
+            collection = self.get_or_create_collection()
+            collection.delete(where={"machine_id": str(machine_id)})
         except Exception:
             # If collection is empty or not yet created, delete is a no-op
             pass

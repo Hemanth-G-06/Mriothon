@@ -1,11 +1,14 @@
 """
 Document Indexing Lifecycle Service.
 Coordinates text chunking, embedding generation, relational metadata storage in Neon,
-and vector indexing in ChromaDB with verification and idempotent retry handling.
+and vector indexing. When VECTOR_BACKEND='pgvector', embeddings are written directly
+to the document_chunks.embedding column. When VECTOR_BACKEND='chroma', the legacy
+ChromaDB path is used.
 """
 
 import logging
 from typing import Optional
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -39,10 +42,26 @@ class DocumentIndexingService:
         embedding_provider: Optional[BaseEmbeddingProvider] = None,
         chunking_service: Optional[ChunkingService] = None,
         chroma_service: Optional[ChromaService] = None,
+        vector_backend: Optional[str] = None,
     ):
         self.embedding_provider = embedding_provider
         self.chunking_service = chunking_service or ChunkingService()
-        self.chroma_service = chroma_service or ChromaService()
+        self._explicit_chroma_service = chroma_service is not None
+        self._chroma_service = chroma_service
+        self._explicit_vector_backend = vector_backend
+
+    @property
+    def chroma_service(self) -> ChromaService:
+        if self._chroma_service is None:
+            self._chroma_service = ChromaService()
+        return self._chroma_service
+
+    def _resolve_vector_backend(self) -> str:
+        if self._explicit_vector_backend:
+            return self._explicit_vector_backend
+        if self._explicit_chroma_service:
+            return 'chroma'
+        return getattr(settings, 'VECTOR_BACKEND', 'pgvector')
 
     def _get_provider(self) -> BaseEmbeddingProvider:
         """Lazily obtains the configured embedding provider if not explicitly injected."""
@@ -57,10 +76,12 @@ class DocumentIndexingService:
         2. Chunk extracted text page by page.
         3. Generate embeddings via configured provider.
         4. Persist chunk records in Neon PostgreSQL.
-        5. Persist vectors and metadata in ChromaDB.
+        5a. (VECTOR_BACKEND='pgvector') Write embeddings into document_chunks.embedding column.
+        5b. (VECTOR_BACKEND='chroma') Persist vectors and metadata in ChromaDB.
         6. Verify vector presence.
         7. Update DocumentIndex status to READY.
         """
+        vector_backend = self._resolve_vector_backend()
         if not document.is_active:
             raise DocumentIndexingError(f"Cannot index inactive document {document.id}.")
 
@@ -108,25 +129,29 @@ class DocumentIndexingService:
             db_chunk_instances = []
 
             for chunk_data, emb in zip(chunks, embeddings):
-                vector_id = self.chroma_service.generate_vector_id(
+                vector_id = ChromaService.generate_vector_id(
                     document_id=str(document.id),
                     page_number=chunk_data.page_number,
                     chunk_index=chunk_data.chunk_index,
                 )
 
-                db_chunk_instances.append(
-                    DocumentChunk(
-                        document=document,
-                        page_id=chunk_data.page_id,
-                        chunk_index=chunk_data.chunk_index,
-                        text=chunk_data.text,
-                        token_count=chunk_data.token_count,
-                        character_start_offset=chunk_data.character_start_offset,
-                        character_end_offset=chunk_data.character_end_offset,
-                        chroma_vector_id=vector_id,
-                        embedding_model=model_id,
-                    )
+                # Build DocumentChunk instance — include embedding when using pgvector backend
+                chunk_kwargs = dict(
+                    document=document,
+                    page_id=chunk_data.page_id,
+                    chunk_index=chunk_data.chunk_index,
+                    text=chunk_data.text,
+                    token_count=chunk_data.token_count,
+                    character_start_offset=chunk_data.character_start_offset,
+                    character_end_offset=chunk_data.character_end_offset,
+                    chroma_vector_id=vector_id,
+                    embedding_model=model_id,
                 )
+                if vector_backend == 'pgvector':
+                    chunk_kwargs['embedding'] = emb
+                    chunk_kwargs['embedding_updated_at'] = timezone.now()
+
+                db_chunk_instances.append(DocumentChunk(**chunk_kwargs))
 
                 chroma_records.append({
                     "id": vector_id,
@@ -142,37 +167,61 @@ class DocumentIndexingService:
                     }
                 })
 
-            # 4. Atomically persist DocumentChunk records in Neon
-            with transaction.atomic():
-                DocumentChunk.objects.filter(document=document).delete()
-                DocumentChunk.objects.bulk_create(db_chunk_instances)
+            if vector_backend == 'pgvector':
+                # 4 (pgvector path). Atomically persist chunks with embeddings in PostgreSQL only.
+                with transaction.atomic():
+                    DocumentChunk.objects.filter(document=document).delete()
+                    DocumentChunk.objects.bulk_create(db_chunk_instances)
 
-            # 5. Persist vectors in ChromaDB
-            try:
-                self.chroma_service.delete_document_vectors(str(document.id))
-                self.chroma_service.upsert_chunks(
-                    chunk_records=chroma_records,
-                    embedding_model=model_id,
-                )
-            except Exception as e:
-                logger.error("ChromaDB persistence failed for document %s: %s", document.id, e)
-                # Rollback Neon chunks on ChromaDB failure to avoid desynchronization
-                DocumentChunk.objects.filter(document=document).delete()
-                index_record.status = IndexingStatus.FAILED
-                index_record.error_message = f"Vector persistence in ChromaDB failed: {e}"
-                index_record.save(update_fields=['status', 'error_message', 'updated_at'])
-                raise DocumentIndexingError(f"ChromaDB persistence failed: {e}") from e
+                # 5 (pgvector path). Verify expected chunk count.
+                pg_count = DocumentChunk.objects.filter(
+                    document=document, embedding__isnull=False
+                ).count()
+                if pg_count != len(chunks):
+                    index_record.status = IndexingStatus.FAILED
+                    index_record.error_message = (
+                        f"pgvector chunk verification failed: expected {len(chunks)}, "
+                        f"found {pg_count} with non-NULL embedding."
+                    )
+                    index_record.save(update_fields=['status', 'error_message', 'updated_at'])
+                    raise DocumentIndexingError(index_record.error_message)
 
-            # 6. Verify ChromaDB contains expected vector count
-            vector_count = self.chroma_service.count_document_vectors(str(document.id))
-            if vector_count != len(chunks):
-                index_record.status = IndexingStatus.FAILED
-                index_record.error_message = (
-                    f"Vector count verification failed: expected {len(chunks)} vectors, "
-                    f"found {vector_count} in ChromaDB."
+                logger.info(
+                    "pgvector: persisted %d chunk embeddings for document %s.",
+                    pg_count, document.id
                 )
-                index_record.save(update_fields=['status', 'error_message', 'updated_at'])
-                raise DocumentIndexingError(index_record.error_message)
+            else:
+                # 4 (chroma path). Atomically persist DocumentChunk records in Neon.
+                with transaction.atomic():
+                    DocumentChunk.objects.filter(document=document).delete()
+                    DocumentChunk.objects.bulk_create(db_chunk_instances)
+
+                # 5 (chroma path). Persist vectors in ChromaDB.
+                try:
+                    self.chroma_service.delete_document_vectors(str(document.id))
+                    self.chroma_service.upsert_chunks(
+                        chunk_records=chroma_records,
+                        embedding_model=model_id,
+                    )
+                except Exception as e:
+                    logger.error("ChromaDB persistence failed for document %s: %s", document.id, e)
+                    # Rollback Neon chunks on ChromaDB failure to avoid desynchronization
+                    DocumentChunk.objects.filter(document=document).delete()
+                    index_record.status = IndexingStatus.FAILED
+                    index_record.error_message = f"Vector persistence in ChromaDB failed: {e}"
+                    index_record.save(update_fields=['status', 'error_message', 'updated_at'])
+                    raise DocumentIndexingError(f"ChromaDB persistence failed: {e}") from e
+
+                # 6 (chroma path). Verify ChromaDB contains expected vector count.
+                vector_count = self.chroma_service.count_document_vectors(str(document.id))
+                if vector_count != len(chunks):
+                    index_record.status = IndexingStatus.FAILED
+                    index_record.error_message = (
+                        f"Vector count verification failed: expected {len(chunks)} vectors, "
+                        f"found {vector_count} in ChromaDB."
+                    )
+                    index_record.save(update_fields=['status', 'error_message', 'updated_at'])
+                    raise DocumentIndexingError(index_record.error_message)
 
             # 7. Mark as READY
             index_record.status = IndexingStatus.READY

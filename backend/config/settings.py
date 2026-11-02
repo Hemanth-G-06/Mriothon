@@ -32,8 +32,10 @@ SECRET_KEY = os.getenv(
 DEBUG = os.getenv('DEBUG', 'True').lower() in ('true', '1', 't', 'yes')
 
 # Allowed hosts configuration
-raw_allowed_hosts = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost')
+raw_allowed_hosts = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,testserver')
 ALLOWED_HOSTS = [host.strip() for host in raw_allowed_hosts.split(',') if host.strip()]
+if 'testserver' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('testserver')
 
 
 # ==============================================================================
@@ -131,6 +133,7 @@ if DATABASE_URL:
             'HOST': conn_params.get('host', ''),
             'PORT': int(conn_params.get('port', 5432)) if conn_params.get('port') else 5432,
             'OPTIONS': db_options,
+            'CONN_HEALTH_CHECKS': True,
         }
     }
 else:
@@ -155,22 +158,16 @@ else:
             'HOST': DB_HOST,
             'PORT': int(DB_PORT) if DB_PORT else 5432,
             'OPTIONS': db_options,
+            'CONN_HEALTH_CHECKS': True,
         }
     }
 
-if os.getenv('USE_SQLITE', 'False').lower() in ('true', '1', 'yes'):
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-
-# Automated test runner database isolation:
-# Uses in-memory SQLite for test execution unless USE_POSTGRES_TEST_DB is set.
-if 'test' in sys.argv and not os.getenv('USE_POSTGRES_TEST_DB', '').lower() in ('true', '1', 'yes'):
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
-    }
+# ==============================================================================
+# Mandatory PostgreSQL Enforcement
+# SQLite is strictly prohibited for production, development, and testing.
+# ==============================================================================
+if DATABASES['default'].get('ENGINE') != 'django.db.backends.postgresql':
+    raise RuntimeError('PostgreSQL is mandatory. SQLite is strictly prohibited.')
 
 
 # ==============================================================================
@@ -290,6 +287,14 @@ CORS_ALLOWED_ORIGINS = [
 
 CORS_ALLOW_CREDENTIALS = True
 
+CORS_EXPOSE_HEADERS = [
+    'Content-Type',
+    'Content-Disposition',
+    'Content-Length',
+    'Content-Range',
+    'Accept-Ranges',
+]
+
 
 # ==============================================================================
 # RAG, Embedding Provider & ChromaDB Configuration
@@ -314,8 +319,35 @@ EMBEDDING_REQUEST_TIMEOUT = int(os.getenv('EMBEDDING_REQUEST_TIMEOUT', '30'))
 CHROMA_PERSIST_DIRECTORY = Path(os.getenv('CHROMA_PERSIST_DIRECTORY', str(BASE_DIR / 'data' / 'chroma')))
 CHROMA_COLLECTION_NAME = os.getenv('CHROMA_COLLECTION_NAME', 'manufacturing_manual_chunks_v1').strip()
 
+# Vector Backend Selection -- controls whether retrieval uses ChromaDB or pgvector.
+# Switch to 'pgvector' only after: migration applied, embeddings rebuilt, and full test suite passes.
+VECTOR_BACKEND = os.getenv('VECTOR_BACKEND', 'pgvector').lower().strip()
+if VECTOR_BACKEND not in ('chroma', 'pgvector'):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        f"VECTOR_BACKEND must be 'chroma' or 'pgvector', got: {VECTOR_BACKEND!r}"
+    )
+
 # Document Chunking Configuration
 CHUNK_TARGET_TOKENS = int(os.getenv('CHUNK_TARGET_TOKENS', '400'))
 CHUNK_MAX_TOKENS = int(os.getenv('CHUNK_MAX_TOKENS', '500'))
 CHUNK_OVERLAP_TOKENS = int(os.getenv('CHUNK_OVERLAP_TOKENS', '60'))
 CHUNK_MIN_TOKENS = int(os.getenv('CHUNK_MIN_TOKENS', '40'))
+
+# RAG Semantic Retrieval Configuration
+RAG_TOP_K = int(os.getenv('RAG_TOP_K', '5'))
+
+# LLM Answer Generation Configuration ('gemini', 'openai_compatible', 'lm_studio')
+# Google Gemini API is the mandatory default API provider.
+LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'gemini').lower().strip()
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.1-flash-lite-preview').strip()
+
+# Common Provider Settings
+LLM_TIMEOUT = int(os.getenv('LLM_TIMEOUT', '60'))
+LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.1'))
+
+# Secondary / Self-hosted Fallback Options (never used implicitly when Gemini fails)
+LLM_MODEL = os.getenv('LLM_MODEL', 'gemini-2.5-flash').strip()
+LLM_BASE_URL = os.getenv('LLM_BASE_URL', '').strip()
+LLM_API_KEY = os.getenv('LLM_API_KEY', '').strip()

@@ -252,6 +252,29 @@ class AuthenticationAPITestCase(TestCase):
         self.assertNotIn('username', data)
         self.assertNotIn('password', data)
 
+    def test_logout_endpoint_blacklists_refresh_token_and_is_idempotent(self):
+        login_res = self.client.post(
+            self.login_url,
+            {'email': 'engineer@factory.local', 'password': self.password},
+        )
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        refresh_token = login_res.json()['refresh']
+
+        # Logout with valid refresh token -> 200 OK
+        logout_res = self.client.post('/api/auth/logout/', {'refresh': refresh_token})
+        self.assertEqual(logout_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(logout_res.json().get('detail'), 'Successfully logged out.')
+
+        # Blacklisted refresh token must be rejected by /api/auth/refresh/
+        refresh_res = self.client.post(self.refresh_url, {'refresh': refresh_token})
+        self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Idempotent second logout or empty body must also succeed with 200 OK
+        repeat_res = self.client.post('/api/auth/logout/', {'refresh': refresh_token})
+        self.assertEqual(repeat_res.status_code, status.HTTP_200_OK)
+        empty_res = self.client.post('/api/auth/logout/', {})
+        self.assertEqual(empty_res.status_code, status.HTTP_200_OK)
+
     def test_current_user_profile_unauthenticated_rejected(self):
         response = self.client.get(self.me_url)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -454,10 +477,73 @@ class SecurityAssuranceTestCase(TestCase):
         self.assertNotIn('pbkdf2_sha256', detail_str)
         self.assertNotIn('password', detail_str)
 
-    def test_logout_blacklists_token(self):
-        refresh = str(RefreshToken.for_user(self.admin))
-        logout_res = self.client.post('/api/auth/logout/', {'refresh': refresh})
-        self.assertEqual(logout_res.status_code, status.HTTP_200_OK)
-        # Verify blacklisted token cannot be refreshed
-        refresh_res = self.client.post('/api/auth/refresh/', {'refresh': refresh})
-        self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+# ==============================================================================
+# 6. Demo Account Provisioning Tests
+# ==============================================================================
+
+from django.core.management import call_command
+from machines.models import Machine, MachineStatus, MachineAssignment
+
+
+class DemoAccountSeedingTestCase(TestCase):
+    """
+    Validates idempotent demo account provisioning command.
+    """
+
+    def setUp(self):
+        self.machine = Machine.objects.create(
+            machine_code='ABB-IRB-6700-01',
+            name='ABB IRB 6700 Heavy Manipulator',
+            status=MachineStatus.ACTIVE,
+        )
+        self.unrelated_user = User.objects.create_user(
+            email='unrelated@factory.local',
+            password='Password@123',
+            role=UserRole.ENGINEER
+        )
+
+    def test_seed_demo_users_provisions_all_roles(self):
+        call_command('seed_demo_users')
+
+        sarah = User.objects.get(email='sarah.connor@gmail.com')
+        self.assertEqual(sarah.role, UserRole.ADMIN)
+        self.assertTrue(sarah.is_active)
+        self.assertTrue(sarah.is_staff)
+        self.assertTrue(sarah.check_password('Admin@123'))
+        self.assertTrue(sarah.password.startswith('pbkdf2_sha256$'))
+
+        alex = User.objects.get(email='alex.vance@gmail.com')
+        self.assertEqual(alex.role, UserRole.ENGINEER)
+        self.assertTrue(alex.is_active)
+        self.assertFalse(alex.is_staff)
+        self.assertTrue(alex.check_password('Engineer@123'))
+        self.assertTrue(alex.password.startswith('pbkdf2_sha256$'))
+
+        marcus = User.objects.get(email='marcus.brody@gmail.com')
+        self.assertEqual(marcus.role, UserRole.SUPERVISOR)
+        self.assertTrue(marcus.is_active)
+        self.assertFalse(marcus.is_staff)
+        self.assertTrue(marcus.check_password('Supervisor@123'))
+        self.assertTrue(marcus.password.startswith('pbkdf2_sha256$'))
+
+        # Check Alex assignment
+        self.assertTrue(
+            MachineAssignment.objects.filter(machine=self.machine, user=alex, is_active=True).exists()
+        )
+
+        # Check unrelated user preserved
+        unrelated = User.objects.get(email='unrelated@factory.local')
+        self.assertTrue(unrelated.is_active)
+
+    def test_seed_demo_users_is_idempotent(self):
+        call_command('seed_demo_users')
+        call_command('seed_demo_users')
+
+        self.assertEqual(User.objects.filter(email='sarah.connor@gmail.com').count(), 1)
+        self.assertEqual(User.objects.filter(email='alex.vance@gmail.com').count(), 1)
+        self.assertEqual(User.objects.filter(email='marcus.brody@gmail.com').count(), 1)
+        self.assertEqual(
+            MachineAssignment.objects.filter(machine=self.machine, user__email='alex.vance@gmail.com').count(),
+            1
+        )

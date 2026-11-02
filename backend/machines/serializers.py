@@ -4,14 +4,7 @@ Serializers for Machine Management and Engineer Assignments.
 
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from machines.models import Machine
 
-
-class MachineSerializer(serializers.ModelSerializer):
-    """
-    Serializer for Machine model supporting list, retrieve, and creation.
-    """
-    manuals_count = serializers.IntegerField(read_only=True)
 from accounts.models import UserRole
 from machines.models import Machine, MachineAssignment, MachineStatus
 
@@ -22,6 +15,7 @@ class MachineListSerializer(serializers.ModelSerializer):
     """
     Compact serializer for listing machines.
     """
+    manuals_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Machine
@@ -33,9 +27,20 @@ class MachineListSerializer(serializers.ModelSerializer):
             'model_number',
             'location',
             'status',
+            'manuals_count',
             'created_at',
             'updated_at',
         ]
+
+    def get_manuals_count(self, obj):
+        from rag.models import IndexingStatus
+        from documents.models import DocumentStatus
+        return obj.documents.filter(
+            is_active=True,
+            status=DocumentStatus.READY
+        ).exclude(
+            index_record__status__in=[IndexingStatus.FAILED, IndexingStatus.PROCESSING]
+        ).count()
         read_only_fields = fields
 
 
@@ -45,6 +50,7 @@ class MachineDetailSerializer(serializers.ModelSerializer):
     """
     created_by_email = serializers.EmailField(source='created_by.email', read_only=True)
     assigned_engineers_count = serializers.SerializerMethodField()
+    manuals_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Machine
@@ -57,12 +63,23 @@ class MachineDetailSerializer(serializers.ModelSerializer):
             'location',
             'description',
             'status',
+            'manuals_count',
             'created_at',
             'updated_at',
             'created_by',
             'created_by_email',
             'assigned_engineers_count',
         ]
+
+    def get_manuals_count(self, obj):
+        from rag.models import IndexingStatus
+        from documents.models import DocumentStatus
+        return obj.documents.filter(
+            is_active=True,
+            status=DocumentStatus.READY
+        ).exclude(
+            index_record__status__in=[IndexingStatus.FAILED, IndexingStatus.PROCESSING]
+        ).count()
         read_only_fields = fields
 
     def get_assigned_engineers_count(self, obj) -> int:
@@ -127,16 +144,6 @@ class MachineUpdateSerializer(serializers.ModelSerializer):
         model = Machine
         fields = [
             'id',
-            'name',
-            'model_number',
-            'serial_number',
-            'location',
-            'description',
-            'manuals_count',
-            'created_at',
-            'updated_at',
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'manuals_count']
             'machine_code',
             'name',
             'manufacturer',
