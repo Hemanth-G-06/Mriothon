@@ -10,6 +10,8 @@ from django.http import HttpResponse
 from django.urls import include, path
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from django.conf import settings
+from django.conf.urls.static import static
 from config.views import HealthCheckView
 
 

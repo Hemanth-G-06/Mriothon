@@ -10,6 +10,7 @@ from accounts.views import (
     LoginView,
     LogoutView,
     RefreshTokenView,
+    RegisterView,
     UserViewSet,
 )
 
@@ -20,6 +21,7 @@ router.register(r'users', UserViewSet, basename='user')
 
 urlpatterns = [
     # Authentication endpoints
+    path('auth/register/', RegisterView.as_view(), name='register'),
     path('auth/login/', LoginView.as_view(), name='login'),
     path('auth/logout/', LogoutView.as_view(), name='logout'),
     path('auth/refresh/', RefreshTokenView.as_view(), name='token_refresh'),

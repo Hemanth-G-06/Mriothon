@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { machineService } from '../../services/machineService';
 import { chatService } from '../../services/chatService';
 import MachineSelector from '../../components/chat/MachineSelector';
@@ -271,41 +272,46 @@ export default function EngineerDashboard() {
 
   return (
     <div className="d-flex flex-column h-100" style={{ minHeight: 'calc(100vh - 120px)' }}>
-      {/* Top Bar: Machine Selector & Mobile History Toggle */}
-      <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-        <div className="d-flex align-items-center gap-2">
-          {/* Mobile history toggle button */}
-          <button
-            type="button"
-            className="btn btn-outline-secondary btn-sm d-lg-none d-flex align-items-center gap-1"
-            onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
-            title="Toggle Conversations History"
-          >
-            <History size={16} />
-            <span>Chats ({conversations.length})</span>
-          </button>
-
-          <MachineSelector
-            machines={machines}
-            selectedMachineId={selectedMachineId}
-            onSelectMachine={handleSelectMachine}
-            disabled={isSending}
-          />
-        </div>
-
-        {activeConversation && (
-          <div className="d-flex align-items-center gap-2 small text-muted">
-            <span className="badge bg-light text-dark border">
-              Grounded: {activeConversation.machine_code || currentMachine?.machine_code || 'OEM'}
-            </span>
-            <span className="text-truncate d-none d-md-inline" style={{ maxWidth: '280px' }}>
-              {activeConversation.title}
-            </span>
+      {/* Visual Quality Inspection Quick Navigation Section */}
+      <div className="card card-industrial p-3 bg-white mb-3">
+        <div className="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+          <div className="d-flex align-items-center gap-3">
+            <div className="p-2 rounded bg-primary bg-opacity-10 text-primary">
+              <Scan size={22} />
+            </div>
+            <div>
+              <div className="d-flex align-items-center gap-2">
+                <h6 className="fw-bold text-dark mb-0">AI Visual Quality Inspection</h6>
+                <span className="badge bg-primary text-white" style={{ fontSize: '0.68rem' }}>MODULE B</span>
+              </div>
+              <p className="text-muted small mb-0" style={{ fontSize: '0.78rem' }}>
+                Automated surface defect classification using model <strong>BIT-PLATE-CV-1.0</strong>.
+              </p>
+            </div>
           </div>
-        )}
+          <div className="d-flex flex-wrap gap-2">
+            <Link to="/engineer/quality-inspection" className="btn btn-primary-industrial btn-sm d-flex align-items-center gap-1">
+              <Scan size={14} /> Single Inspection
+            </Link>
+            <Link to="/engineer/batch-inspection" className="btn btn-outline-primary btn-sm d-flex align-items-center gap-1">
+              <Layers size={14} /> Batch Inspection
+            </Link>
+            <Link to="/engineer/inspection-history" className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1">
+              <History size={14} /> Inspection History
+            </Link>
+          </div>
+        </div>
       </div>
 
-      {/* Error alert banner */}
+      {/* Top Machine Selector Bar */}
+      <MachineSelector
+        machines={machines}
+        selectedMachineId={selectedMachineId}
+        onSelectMachine={handleSelectMachine}
+        disabled={isSending}
+      />
+
+      {/* Error alert */}
       {error && (
         <div className="alert alert-danger py-2 small d-flex align-items-center justify-content-between mb-3 shadow-sm">
           <div className="d-flex align-items-center gap-2">
@@ -324,9 +330,8 @@ export default function EngineerDashboard() {
             LEFT PANEL: Conversation History Sidebar
             ========================================================================= */}
         <div
-          className={`col-lg-3 col-12 d-lg-block ${
-            isMobileSidebarOpen ? 'd-block position-fixed start-0 top-0 h-100 bg-white shadow-lg p-3' : 'd-none'
-          }`}
+          className={`col-lg-3 col-12 d-lg-block ${isMobileSidebarOpen ? 'd-block position-fixed start-0 top-0 h-100 bg-white shadow-lg p-3' : 'd-none'
+            }`}
           style={isMobileSidebarOpen ? { zIndex: 1050, width: '320px', maxWidth: '85vw' } : {}}
         >
           <div className="card card-industrial p-3 h-100 bg-white d-flex flex-column shadow-sm" style={{ maxHeight: '72vh' }}>
@@ -382,11 +387,10 @@ export default function EngineerDashboard() {
                     <div
                       key={conv.id}
                       onClick={() => loadConversation(conv.id)}
-                      className={`p-2 mb-2 rounded border text-start cursor-pointer transition-all d-flex align-items-start justify-content-between gap-2 ${
-                        isActive
+                      className={`p-2 mb-2 rounded border text-start cursor-pointer transition-all d-flex align-items-start justify-content-between gap-2 ${isActive
                           ? 'bg-primary bg-opacity-10 border-primary text-primary shadow-sm'
                           : 'bg-light bg-opacity-50 border-light-subtle text-dark hover-shadow'
-                      }`}
+                        }`}
                       style={{ cursor: 'pointer' }}
                     >
                       <div className="overflow-hidden flex-grow-1">
