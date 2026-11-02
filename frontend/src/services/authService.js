@@ -67,6 +67,10 @@ export const authService = {
         };
       }
 
+      if (!err.response) {
+        throw new Error('Unable to connect to the server. Please check your connection and try again.');
+      }
+
       // Parse Django REST Framework error response formats
       let message = 'Registration failed. Please verify your details.';
       if (err.response?.data) {
@@ -77,6 +81,12 @@ export const authService = {
           message = Array.isArray(data.email) ? data.email[0] : data.email;
         } else if (data.password) {
           message = Array.isArray(data.password) ? data.password[0] : data.password;
+        } else if (data.password_confirm) {
+          message = Array.isArray(data.password_confirm) ? data.password_confirm[0] : data.password_confirm;
+        } else if (data.first_name) {
+          message = Array.isArray(data.first_name) ? data.first_name[0] : data.first_name;
+        } else if (data.last_name) {
+          message = Array.isArray(data.last_name) ? data.last_name[0] : data.last_name;
         } else if (data.detail) {
           message = data.detail;
         } else if (data.non_field_errors) {
@@ -87,7 +97,7 @@ export const authService = {
           const firstKey = Object.keys(data)[0];
           if (firstKey && data[firstKey]) {
             const val = data[firstKey];
-            message = `${firstKey}: ${Array.isArray(val) ? val[0] : val}`;
+            message = Array.isArray(val) ? val[0] : val;
           }
         }
       }

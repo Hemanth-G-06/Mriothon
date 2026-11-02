@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'documents.apps.DocumentsConfig',
     'rag.apps.RagConfig',
     'history.apps.HistoryConfig',
+    'inspections.apps.InspectionsConfig',
 ]
 
 MIDDLEWARE = [

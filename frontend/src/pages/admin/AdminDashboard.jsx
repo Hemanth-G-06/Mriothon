@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Cpu, FileText, CheckCircle2, Clock, PlusCircle, Upload, ArrowRight, AlertCircle } from 'lucide-react';
+import { Cpu, FileText, CheckCircle2, Clock, PlusCircle, Upload, ArrowRight, AlertCircle, Package } from 'lucide-react';
 import { machineService } from '../../services/machineService';
 import { documentService } from '../../services/documentService';
+import { inspectionService } from '../../services/inspectionService';
 import StatusBadge from '../../components/common/StatusBadge';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import { formatDateTime, formatFileSize } from '../../utils/formatters';
@@ -11,6 +12,7 @@ import { getErrorMessage } from '../../utils/errorHandler';
 export default function AdminDashboard() {
   const [machines, setMachines] = useState([]);
   const [documents, setDocuments] = useState([]);
+  const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState(null);
 
@@ -21,10 +23,11 @@ export default function AdminDashboard() {
       try {
         const results = await Promise.allSettled([
           machineService.getMachines(),
-          documentService.getDocuments()
+          documentService.getDocuments(),
+          inspectionService.getProducts()
         ]);
 
-        const [mRes, dRes] = results;
+        const [mRes, dRes, pRes] = results;
 
         if (mRes.status === 'fulfilled') {
           setMachines(Array.isArray(mRes.value) ? mRes.value : (mRes.value?.results || []));
@@ -36,6 +39,12 @@ export default function AdminDashboard() {
           setDocuments(Array.isArray(dRes.value) ? dRes.value : (dRes.value?.results || []));
         } else {
           console.warn('Documents failed to load:', dRes.reason);
+        }
+
+        if (pRes.status === 'fulfilled') {
+          setProducts(Array.isArray(pRes.value) ? pRes.value : (pRes.value?.results || []));
+        } else {
+          console.warn('Products failed to load:', pRes.reason);
         }
 
         const failed = results.filter((r) => r.status === 'rejected');
@@ -92,9 +101,12 @@ export default function AdminDashboard() {
             Manage industrial machinery registry, PDF technical manuals, and RAG vector indexing pipeline.
           </p>
         </div>
-        <div className="d-flex gap-2">
+        <div className="d-flex flex-wrap gap-2">
           <Link to="/admin/machines" className="btn btn-outline-primary btn-sm d-flex align-items-center gap-1">
             <PlusCircle size={15} /> Register Machine
+          </Link>
+          <Link to="/admin/products" className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1">
+            <Package size={15} /> Product Registry ({products.length})
           </Link>
           <Link to="/admin/documents" className="btn btn-primary-industrial btn-sm d-flex align-items-center gap-1">
             <Upload size={15} /> Upload Manual
