@@ -2,11 +2,29 @@
 URL routing for the Machines application.
 """
 
-from django.urls import path
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
+
+from machines.views import (
+    MachineAssignmentDeleteView,
+    MachineAssignmentListCreateView,
+    MachineViewSet,
+)
+from documents.views import MachineDocumentsListView
 
 app_name = 'machines'
 
-urlpatterns = [
-    # Machine endpoints will be mapped here in subsequent phases.
-]
+router = DefaultRouter()
+router.register(r'', MachineViewSet, basename='machine')
 
+urlpatterns = [
+    # Machine documents listing
+    path('<uuid:machine_id>/documents/', MachineDocumentsListView.as_view(), name='machine-documents'),
+
+    # Machine assignments endpoints
+    path('<uuid:machine_id>/assignments/', MachineAssignmentListCreateView.as_view(), name='machine-assignments'),
+    path('<uuid:machine_id>/assignments/<int:assignment_id>/', MachineAssignmentDeleteView.as_view(), name='machine-unassign'),
+
+    # Machine CRUD routes (via router)
+    path('', include(router.urls)),
+]

@@ -82,6 +82,10 @@ chromadb/
 .chroma/
 vectorstore/
 *.chromadb
+data/
+data/*
+backend/data/
+backend/data/*
 backend/chroma/
 backend/chromadb/
 backend/.chroma/

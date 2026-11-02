@@ -297,7 +297,8 @@ class UserManagementRBACAPITestCase(TestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.admin_token}')
         response = self.client.get(self.users_url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        results = response.json().get('results', response.json())
+        data = response.json()
+        results = data.get('results', data) if isinstance(data, dict) else data
         self.assertGreaterEqual(len(results), 3)
 
     def test_engineer_cannot_list_users(self):
