@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'rag.apps.RagConfig',
     'history.apps.HistoryConfig',
     'chat.apps.ChatConfig',
+    'inspections.apps.InspectionsConfig',
 ]
 
 MIDDLEWARE = [
@@ -108,10 +109,11 @@ AUTH_USER_MODEL = 'accounts.User'
 
 
 # ==============================================================================
-# Database Configuration (Neon PostgreSQL / PostgreSQL 18)
+# Database Configuration (PostgreSQL / SQLite for development)
 # ==============================================================================
 
 DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
+USE_SQLITE = os.getenv('USE_SQLITE', 'auto').lower()
 
 if DATABASE_URL:
     # Primary configuration method: parse DATABASE_URL via psycopg conninfo
@@ -135,6 +137,17 @@ if DATABASE_URL:
             'PORT': int(conn_params.get('port', 5432)) if conn_params.get('port') else 5432,
             'OPTIONS': db_options,
             'CONN_HEALTH_CHECKS': True,
+        }
+    }
+elif USE_SQLITE in ('true', '1', 'yes') or (USE_SQLITE == 'auto' and not os.getenv('DB_PASSWORD') and not os.getenv('DB_HOST')):
+    # Round 2 Challenge Stack: SQLite development database
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {
+                'timeout': 30,
+            }
         }
     }
 else:
@@ -164,11 +177,9 @@ else:
     }
 
 # ==============================================================================
-# Mandatory PostgreSQL Enforcement
-# SQLite is strictly prohibited for production, development, and testing.
+# Database Engine Verification
 # ==============================================================================
-if DATABASES['default'].get('ENGINE') != 'django.db.backends.postgresql':
-    raise RuntimeError('PostgreSQL is mandatory. SQLite is strictly prohibited.')
+# Both PostgreSQL and SQLite are supported per Round 2 specifications.
 
 
 # ==============================================================================
@@ -322,7 +333,8 @@ CHROMA_COLLECTION_NAME = os.getenv('CHROMA_COLLECTION_NAME', 'manufacturing_manu
 
 # Vector Backend Selection -- controls whether retrieval uses ChromaDB or pgvector.
 # Switch to 'pgvector' only after: migration applied, embeddings rebuilt, and full test suite passes.
-VECTOR_BACKEND = os.getenv('VECTOR_BACKEND', 'pgvector').lower().strip()
+default_vector = 'chroma' if DATABASES['default']['ENGINE'] == 'django.db.backends.sqlite3' else 'pgvector'
+VECTOR_BACKEND = os.getenv('VECTOR_BACKEND', default_vector).lower().strip()
 if VECTOR_BACKEND not in ('chroma', 'pgvector'):
     from django.core.exceptions import ImproperlyConfigured
     raise ImproperlyConfigured(
@@ -352,3 +364,23 @@ LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.1'))
 LLM_MODEL = os.getenv('LLM_MODEL', 'gemini-2.5-flash').strip()
 LLM_BASE_URL = os.getenv('LLM_BASE_URL', '').strip()
 LLM_API_KEY = os.getenv('LLM_API_KEY', '').strip()
+
+
+# ==============================================================================
+# Celery and Redis Configuration (Mandatory Round 2 Distributed Processing)
+# ==============================================================================
+
+REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', REDIS_URL)
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_WORKER_CONCURRENCY = int(os.getenv('CELERY_WORKER_CONCURRENCY', '4'))
+# Optional eager mode for testing without a running Redis server
+CELERY_TASK_ALWAYS_EAGER = os.getenv('CELERY_TASK_ALWAYS_EAGER', 'False').lower() in ('true', '1', 'yes')
+CELERY_TASK_EAGER_PROPAGATES = True
+

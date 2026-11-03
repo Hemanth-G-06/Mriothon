@@ -35,6 +35,8 @@ class InspectionRecordSerializer(serializers.ModelSerializer):
     """
     image_url = serializers.SerializerMethodField()
     thumbnail_url = serializers.SerializerMethodField()
+    product_id = serializers.CharField(source='product.id', read_only=True)
+    error_message = serializers.CharField(source='failure_reason', read_only=True)
 
     class Meta:
         model = InspectionRecord
@@ -48,6 +50,7 @@ class InspectionRecordSerializer(serializers.ModelSerializer):
             'defect_probability',
             'model_version',
             'status',
+            'failure_reason',
             'error_message',
             'review_status',
             'supervisor_class',
@@ -110,15 +113,27 @@ class BatchInspectionSerializer(serializers.ModelSerializer):
     Serializer for batch inspection status and items.
     """
     items = serializers.SerializerMethodField()
+    total = serializers.IntegerField(source='total_images', read_only=True)
+    completed = serializers.IntegerField(source='completed_count', read_only=True)
+    failed = serializers.IntegerField(source='failed_count', read_only=True)
+    processing = serializers.IntegerField(source='processing_count', read_only=True)
+    queued = serializers.IntegerField(source='queued_count', read_only=True)
 
     class Meta:
         model = BatchInspection
         fields = [
             'batch_id',
             'product_id',
+            'total',
             'total_images',
+            'completed',
             'completed_count',
+            'failed',
             'failed_count',
+            'processing',
+            'processing_count',
+            'queued',
+            'queued_count',
             'status',
             'created_at',
             'updated_at',

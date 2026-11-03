@@ -11,21 +11,24 @@ from django.conf import settings
 class Product(models.Model):
     """
     Manufactured product registered for AI visual quality inspection.
-    Example: P-PLATE01 (Base plate component).
+    Example: P-PLATE01 (Demonstration metal plate).
     """
     id = models.CharField(
         max_length=100,
         primary_key=True,
         help_text="Unique Product ID (e.g. P-PLATE01)"
     )
-    name = models.CharField(max_length=255, help_text="Product name")
+    name = models.CharField(max_length=255, default='Demonstration metal plate', help_text="Product name")
     model_version = models.CharField(
         max_length=100,
         default='BIT-PLATE-CV-1.0',
         help_text="Target computer vision classifier model"
     )
     category = models.CharField(max_length=100, default='Milled Components')
-    description = models.TextField(blank=True, default='')
+    description = models.TextField(
+        blank=True,
+        default='Synthetic centered plate with scratches or pits.'
+    )
     status = models.CharField(max_length=50, default='Active')
     min_dimensions = models.CharField(max_length=50, default='64x64')
     max_dimensions = models.CharField(max_length=50, default='4096x4096')
@@ -41,7 +44,7 @@ class Product(models.Model):
 
 class BatchInspection(models.Model):
     """
-    Tracks bulk upload batch execution state and progress.
+    Tracks bulk upload batch execution state, Celery tasks, and progress.
     """
     batch_id = models.CharField(max_length=100, primary_key=True)
     product_id = models.CharField(max_length=100, default='P-PLATE01')
@@ -55,7 +58,9 @@ class BatchInspection(models.Model):
     total_images = models.IntegerField(default=0)
     completed_count = models.IntegerField(default=0)
     failed_count = models.IntegerField(default=0)
-    status = models.CharField(max_length=50, default='Completed')  # Queued, Processing, Completed, Failed
+    processing_count = models.IntegerField(default=0)
+    queued_count = models.IntegerField(default=0)
+    status = models.CharField(max_length=50, default='Queued')  # Queued, Processing, Completed, Failed
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -117,22 +122,31 @@ class InspectionRecord(models.Model):
     )
     engineer_name = models.CharField(max_length=255, blank=True, default='Plant Engineer')
 
-    image = models.FileField(upload_to='inspections/%Y/%m/')
+    image = models.FileField(upload_to='inspections/%Y/%m/', null=True, blank=True)
     file_name = models.CharField(max_length=255, blank=True, default='')
     file_size = models.BigIntegerField(default=0)
     image_width = models.IntegerField(default=0)
     image_height = models.IntegerField(default=0)
 
-    # Genuine AI Inference Outputs (NEVER overwritten)
-    predicted_class = models.CharField(max_length=50, choices=CLASS_CHOICES, default=CLASS_NORMAL)
-    confidence = models.FloatField(default=0.0)
-    defect_probability = models.FloatField(default=0.0)
+    # Genuine AI Inference Outputs (Immutable once set; empty for invalid/failed items)
+    predicted_class = models.CharField(max_length=50, blank=True, default='')
+    confidence = models.FloatField(null=True, blank=True, default=None)
+    defect_probability = models.FloatField(null=True, blank=True, default=None)
     model_version = models.CharField(max_length=100, default='BIT-PLATE-CV-1.0')
 
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=STATUS_COMPLETED)
-    error_message = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    failure_reason = models.TextField(blank=True, default='')
 
-    # Supervisor Review Audit Section
+    # Backward compatibility alias
+    @property
+    def error_message(self):
+        return self.failure_reason
+
+    @error_message.setter
+    def error_message(self, val):
+        self.failure_reason = val
+
+    # Supervisor Review Audit Section (Kept strictly separate from AI predictions)
     review_status = models.CharField(max_length=50, choices=REVIEW_CHOICES, default=REVIEW_PENDING, db_index=True)
     supervisor_class = models.CharField(max_length=50, blank=True, default='')
     supervisor = models.ForeignKey(
@@ -154,4 +168,6 @@ class InspectionRecord(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"[{self.product_id}] Inspection #{self.id}: {self.predicted_class} ({self.confidence * 100:.1f}%)"
+        pred = self.predicted_class or "No prediction"
+        conf_str = f" ({self.confidence * 100:.1f}%)" if self.confidence is not None else ""
+        return f"[{self.product_id}] Inspection #{self.id}: {pred}{conf_str} - {self.status}"

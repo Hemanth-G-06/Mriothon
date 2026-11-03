@@ -4,9 +4,10 @@ API Views for the Inspections application.
 Provides REST endpoints for:
 1. Product management (/api/products/)
 2. Single image inspection inference (/api/inspections/single/)
-3. High-throughput batch image inspection (/api/inspections/batch/)
-4. Persistent inspection history query & filtering (/api/inspections/)
-5. Supervisor quality review audit & calibration (/api/inspections/:id/review/)
+3. Asynchronous batch inspection via Celery & Redis (/api/inspections/batch/)
+4. Batch progress polling (/api/inspections/batch/<batch_id>/)
+5. Persistent inspection history query & filtering (/api/inspections/)
+6. Supervisor review audit queue & calibration (/api/supervisor/inspections/ & /api/inspections/:id/review/)
 """
 
 import os
@@ -21,7 +22,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import UserRole
-from accounts.permissions import IsAdmin, IsSupervisor
 from inspections.models import Product, InspectionRecord, BatchInspection
 from inspections.serializers import (
     ProductSerializer,
@@ -29,15 +29,17 @@ from inspections.serializers import (
     SupervisorReviewSerializer,
     BatchInspectionSerializer
 )
-from inspections.classifier import classifier, validate_image_bytes, ImageValidationError
+from inspections.services.image_validator import validate_image, ImageValidationError
+from inspections.services.inference_service import inference_service
+from inspections.tasks import process_inspection_task
 
 
 DEFAULT_PLATE_PRODUCT = {
     'id': 'P-PLATE01',
-    'name': 'Industrial Metal Base Plate',
+    'name': 'Demonstration metal plate',
     'model_version': 'BIT-PLATE-CV-1.0',
     'category': 'Milled Components',
-    'description': 'Precision milled metallic mounting plate inspected for surface cracks, porosities, and machining defects.',
+    'description': 'Synthetic centered plate with scratches or pits.',
     'status': 'Active',
     'min_dimensions': '64x64',
     'max_dimensions': '4096x4096'
@@ -120,23 +122,21 @@ class InspectionListView(APIView):
     def get(self, request):
         queryset = InspectionRecord.objects.all().order_by('-created_at')
 
-        # Role Scoping
+        # Role Scoping: Engineers only see their own records
         is_admin_or_super = (
             request.user.role in (UserRole.ADMIN, UserRole.SUPERVISOR) or
             request.user.is_superuser
         )
 
-        product_id = request.query_params.get('product_id', '').strip()
-
-        # If user is an engineer and not querying admin product details, scope to user
         if not is_admin_or_super:
             queryset = queryset.filter(user=request.user)
 
         # Filter by Product ID (e.g. ?product_id=P-PLATE01)
+        product_id = request.query_params.get('product_id', '').strip()
         if product_id:
             queryset = queryset.filter(
                 Q(product__id__iexact=product_id) |
-                Q(product__name__iexact=product_id)
+                Q(product__name__icontains=product_id)
             )
 
         # Keyword Search
@@ -161,7 +161,7 @@ class InspectionListView(APIView):
         if predicted_class and predicted_class.lower() != 'all':
             queryset = queryset.filter(predicted_class__iexact=predicted_class)
 
-        # Processing Status Filter (Completed, Processing, Failed)
+        # Processing Status Filter (Completed, Processing, Queued, Failed)
         status_param = request.query_params.get('status', '').strip()
         if status_param and status_param.lower() != 'all':
             queryset = queryset.filter(status__iexact=status_param)
@@ -201,13 +201,13 @@ class InspectionDetailView(APIView):
     """
     GET /api/inspections/<int:pk>/
     Retrieves full telemetry for a single inspection record.
+    Engineers are forbidden from viewing records belonging to other engineers.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
         try:
             record = InspectionRecord.objects.get(pk=pk)
-            # Engineers can only view their own record unless admin/supervisor
             is_admin_or_super = (
                 request.user.role in (UserRole.ADMIN, UserRole.SUPERVISOR) or
                 request.user.is_superuser
@@ -228,13 +228,13 @@ class InspectionDetailView(APIView):
 
 
 # ==============================================================================
-# 3. Single Image Inspection Inference Endpoint
+# 3. Single Image Inspection Inference Endpoint (Synchronous)
 # ==============================================================================
 
 class SingleInspectionView(APIView):
     """
     POST /api/inspections/single/ (also POST /api/inspections/)
-    Uploads a single plate image for AI computer vision inference.
+    Uploads a single plate image for synchronous AI computer vision inference.
 
     Payload: multipart/form-data
     - file: Image file (JPEG/PNG, max 5 MiB, 64x64 to 4096x4096)
@@ -256,39 +256,41 @@ class SingleInspectionView(APIView):
 
         try:
             file_bytes = uploaded_file.read()
-            # 1. Structural image validation
-            img_format, width, height = validate_image_bytes(file_bytes, uploaded_file.name)
 
-            # 2. Run genuine Computer Vision inference model (BIT-PLATE-CV-1.0)
-            prediction = classifier.predict(file_bytes, uploaded_file.name)
+            # 1. Server-side Pillow decoding and validation
+            img_format, width, height = validate_image(file_bytes, uploaded_file.name)
 
-            # 3. Persist InspectionRecord
+            # 2. Persist record and save image file to media storage
             record = InspectionRecord(
                 product=product,
-                product_id=product_id,
                 user=request.user,
                 engineer_name=request.user.full_name,
                 file_name=uploaded_file.name,
                 file_size=len(file_bytes),
                 image_width=width,
                 image_height=height,
-                predicted_class=prediction['predicted_class'],
-                confidence=prediction['confidence'],
-                defect_probability=prediction['defect_probability'],
-                model_version=prediction['model_version'],
-                status=InspectionRecord.STATUS_COMPLETED,
+                status=InspectionRecord.STATUS_PROCESSING,
                 review_status=InspectionRecord.REVIEW_PENDING
             )
+            record.image.save(uploaded_file.name, ContentFile(file_bytes), save=True)
 
-            # Save uploaded image file to media storage
-            record.image.save(uploaded_file.name, ContentFile(file_bytes), save=False)
+            # 3. Execute official AI model inference
+            prediction = inference_service.run_inference(record.image.path)
+
+            # 4. Save AI predictions to record
+            record.predicted_class = prediction['predicted_class']
+            record.confidence = prediction['confidence']
+            record.defect_probability = prediction['defect_probability']
+            record.model_version = prediction['model_version']
+            record.status = InspectionRecord.STATUS_COMPLETED
+            record.failure_reason = ''
             record.save()
 
             serializer = InspectionRecordSerializer(record, context={'request': request})
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-        except ImageValidationError as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ImageValidationError as val_err:
+            return Response({'detail': str(val_err)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response(
                 {'detail': f"Inference processing failed: {str(e)}"},
@@ -297,19 +299,19 @@ class SingleInspectionView(APIView):
 
 
 # ==============================================================================
-# 4. Batch Image Inspection Endpoint
+# 4. Asynchronous Batch Image Inspection Endpoint (Celery + Redis)
 # ==============================================================================
 
 class BatchInspectionView(APIView):
     """
     POST /api/inspections/batch/
-    Uploads a batch of 1 to 10 images for high-throughput automated inspection.
-    Fault-isolated: A corrupted image does not prevent remaining valid images from being processed.
+    Uploads a batch of 1 to 10 images for asynchronous background processing via Celery and Redis.
+    Fault-isolated: Invalid files are saved as failed attempts without AI prediction,
+    while valid files continue processing in the background.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Support both 'files' and 'images' parameter names
         file_list = request.FILES.getlist('files') or request.FILES.getlist('images')
         if not file_list:
             return Response(
@@ -334,84 +336,141 @@ class BatchInspectionView(APIView):
             product_id=product_id,
             user=request.user,
             total_images=len(file_list),
-            status='Processing'
+            status='Queued',
+            queued_count=0,
+            failed_count=0,
+            completed_count=0,
+            processing_count=0
         )
 
-        completed_items = []
-        completed_count = 0
+        initial_items = []
+        queued_count = 0
         failed_count = 0
 
+        records_to_enqueue = []
         for uploaded_file in file_list:
-            try:
-                file_bytes = uploaded_file.read()
-                img_format, width, height = validate_image_bytes(file_bytes, uploaded_file.name)
-                prediction = classifier.predict(file_bytes, uploaded_file.name)
+            file_bytes = uploaded_file.read()
+            filename = uploaded_file.name
 
+            # 1. Validate image format, size, dimensions, and integrity
+            try:
+                img_format, width, height = validate_image(file_bytes, filename)
+
+                # Valid image: create record and enqueue to Celery
                 record = InspectionRecord(
                     product=product,
-                    product_id=product_id,
                     user=request.user,
                     engineer_name=request.user.full_name,
-                    file_name=uploaded_file.name,
+                    file_name=filename,
                     file_size=len(file_bytes),
                     image_width=width,
                     image_height=height,
-                    predicted_class=prediction['predicted_class'],
-                    confidence=prediction['confidence'],
-                    defect_probability=prediction['defect_probability'],
-                    model_version=prediction['model_version'],
-                    status=InspectionRecord.STATUS_COMPLETED,
+                    status=InspectionRecord.STATUS_QUEUED,
                     review_status=InspectionRecord.REVIEW_PENDING,
                     batch_id=batch_id
                 )
-                record.image.save(uploaded_file.name, ContentFile(file_bytes), save=False)
-                record.save()
+                record.image.save(filename, ContentFile(file_bytes), save=True)
+                queued_count += 1
+                records_to_enqueue.append(record.id)
 
-                completed_count += 1
-                serialized = InspectionRecordSerializer(record, context={'request': request}).data
-                completed_items.append(serialized)
+                initial_items.append(InspectionRecordSerializer(record, context={'request': request}).data)
 
             except ImageValidationError as val_err:
+                # Invalid file: persist failed-attempt record with failure reason and NO AI prediction
                 failed_count += 1
-                completed_items.append({
-                    'id': None,
-                    'file_name': uploaded_file.name,
-                    'status': 'Failed',
-                    'error': str(val_err)
-                })
+                record = InspectionRecord.objects.create(
+                    product=product,
+                    user=request.user,
+                    engineer_name=request.user.full_name,
+                    file_name=filename,
+                    file_size=len(file_bytes),
+                    image_width=0,
+                    image_height=0,
+                    predicted_class='',
+                    confidence=None,
+                    defect_probability=None,
+                    status=InspectionRecord.STATUS_FAILED,
+                    failure_reason=str(val_err),
+                    review_status=InspectionRecord.REVIEW_PENDING,
+                    batch_id=batch_id
+                )
+                initial_items.append(InspectionRecordSerializer(record, context={'request': request}).data)
+
             except Exception as e:
                 failed_count += 1
-                completed_items.append({
-                    'id': None,
-                    'file_name': uploaded_file.name,
-                    'status': 'Failed',
-                    'error': f"Processing error: {str(e)}"
-                })
+                record = InspectionRecord.objects.create(
+                    product=product,
+                    user=request.user,
+                    engineer_name=request.user.full_name,
+                    file_name=filename,
+                    file_size=len(file_bytes),
+                    image_width=0,
+                    image_height=0,
+                    predicted_class='',
+                    confidence=None,
+                    defect_probability=None,
+                    status=InspectionRecord.STATUS_FAILED,
+                    failure_reason=f"Processing error: {str(e)}",
+                    review_status=InspectionRecord.REVIEW_PENDING,
+                    batch_id=batch_id
+                )
+                initial_items.append(InspectionRecordSerializer(record, context={'request': request}).data)
 
-        batch_obj.completed_count = completed_count
+        batch_obj.queued_count = queued_count
         batch_obj.failed_count = failed_count
-        batch_obj.status = 'Completed'
-        batch_obj.save()
+        batch_obj.status = 'Processing' if queued_count > 0 else 'Failed'
+        batch_obj.save(update_fields=['queued_count', 'failed_count', 'status', 'updated_at'])
+
+        # Enqueue background Celery tasks AFTER the batch record is saved to prevent race conditions
+        for record_id in records_to_enqueue:
+            process_inspection_task.delay(record_id)
 
         return Response({
             'batch_id': batch_id,
             'total': len(file_list),
-            'completed': completed_count,
+            'total_images': len(file_list),
+            'completed': 0,
+            'completed_count': 0,
             'failed': failed_count,
-            'items': completed_items
+            'failed_count': failed_count,
+            'processing': 0,
+            'processing_count': 0,
+            'queued': queued_count,
+            'queued_count': queued_count,
+            'status': batch_obj.status,
+            'items': initial_items
         }, status=status.HTTP_201_CREATED)
 
 
 class BatchStatusView(APIView):
     """
     GET /api/inspections/batch/<str:batch_id>/
-    Polls the progress status of an asynchronous or executed batch inspection.
+    Polls the progress status of an asynchronous batch inspection.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, batch_id):
         try:
             batch_obj = BatchInspection.objects.get(batch_id=batch_id)
+
+            # Reconcile counters from actual records in database
+            records = InspectionRecord.objects.filter(batch_id=batch_id)
+            comp_c = records.filter(status=InspectionRecord.STATUS_COMPLETED).count()
+            fail_c = records.filter(status=InspectionRecord.STATUS_FAILED).count()
+            proc_c = records.filter(status=InspectionRecord.STATUS_PROCESSING).count()
+            que_c = records.filter(status=InspectionRecord.STATUS_QUEUED).count()
+
+            if (comp_c + fail_c) >= batch_obj.total_images and batch_obj.total_images > 0:
+                batch_obj.status = 'Completed' if comp_c > 0 else 'Failed'
+            elif proc_c > 0 or comp_c > 0:
+                batch_obj.status = 'Processing'
+
+            batch_obj.completed_count = comp_c
+            batch_obj.failed_count = fail_c
+            batch_obj.processing_count = proc_c
+            batch_obj.queued_count = que_c
+            batch_obj.save(update_fields=['status', 'completed_count', 'failed_count', 'processing_count', 'queued_count', 'updated_at'])
+
             serializer = BatchInspectionSerializer(batch_obj, context={'request': request})
             return Response(serializer.data, status=status.HTTP_200_OK)
         except BatchInspection.DoesNotExist:
@@ -478,7 +537,7 @@ class SupervisorReviewView(APIView):
     Guarantees:
     - The original AI prediction is NEVER overwritten.
     - Captures supervisor identity, reviewed class, timestamp, and optional comment.
-    - Strictly authorized to Supervisors and Administrators.
+    - Strictly authorized to Supervisors and Administrators. Engineers receive 403 Forbidden.
     """
     permission_classes = [IsAuthenticated]
 
@@ -519,6 +578,5 @@ class SupervisorReviewView(APIView):
         record.reviewed_at = timezone.now()
         record.save()
 
-        # Return updated record with full supervisor details
         output_serializer = InspectionRecordSerializer(record, context={'request': request})
         return Response(output_serializer.data, status=status.HTTP_200_OK)

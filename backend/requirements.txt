@@ -4,11 +4,19 @@ djangorestframework==3.18.3
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
 
+# Distributed Task Queue & Caching
+celery>=5.3.6
+redis>=5.0.0
+
+# Computer Vision & Numerical Computing
+Pillow>=11.0.0
+numpy>=2.0.0
+
 # Database Driver (PostgreSQL 18 / Psycopg 3)
 psycopg[binary]==3.3.6
 
-# PDF Processing & Extraction
-pymupdf==2.0
+# PDF Processing & Extraction (PyMuPDF 1.24+ supports Python 3.10-3.13 on macOS ARM64 & Windows)
+pymupdf>=1.24.14,<2.0
 
 # Vector Database & HTTP Client for Embeddings
 chromadb==1.5.9
@@ -17,8 +25,8 @@ requests==2.34.2
 # pgvector — PostgreSQL vector similarity search (Django ORM integration)
 pgvector==0.5.1
 
-# Hosted LLM Answer Generation (Google Gemini API)
-google-genai>=2.34.0
+# Hosted LLM Answer Generation (Google Gemini API: >=2.30.0 supports Python 3.10+)
+google-genai>=2.30.0
 
 # Agentic AI & Orchestration (AgentOps)
 langgraph>=0.2.0
@@ -34,8 +42,8 @@ python-dotenv==1.2.4
 # JWT & Cryptography
 PyJWT==2.15.1
 
-# Transitive Dependencies
-asgiref==3.13.0
+# Transitive Dependencies (relaxed to accommodate Python 3.10 while supporting 3.11+)
+asgiref>=3.8.1,<4.0
 sqlparse==0.6.1
-typing-extensions==4.16.0
-tzdata==2026.6
+typing-extensions>=4.12.0
+tzdata>=2025.1

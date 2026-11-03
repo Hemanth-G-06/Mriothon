@@ -150,23 +150,10 @@ export const inspectionService = {
    * Calls /products/ API, and merges with local registered products.
    */
   async getProducts() {
-    try {
-      const response = await apiClient.get('/products/');
-      const data = response.data;
-      const apiList = Array.isArray(data) ? data : (data?.results || []);
-      if (apiList.length > 0) {
-        // Ensure P-PLATE01 is represented
-        if (!apiList.some((p) => p.id === 'P-PLATE01')) {
-          return [...DEFAULT_PRODUCTS, ...apiList];
-        }
-        return apiList;
-      }
-      return getLocalProducts();
-    } catch (err) {
-      // Backend /products/ might not be implemented yet or network issue
-      console.warn('[inspectionService] Backend /products/ unavailable, using cached product catalog:', err?.message);
-      return getLocalProducts();
-    }
+    const response = await apiClient.get('/products/');
+    const data = response.data;
+    const apiList = Array.isArray(data) ? data : (data?.results || []);
+    return apiList;
   },
 
   /**
@@ -174,39 +161,24 @@ export const inspectionService = {
    * @param {string} productId
    */
   async getProductById(productId) {
-    try {
-      const response = await apiClient.get(`/products/${productId}/`);
-      return response.data;
-    } catch (err) {
-      const local = getLocalProducts().find((p) => p.id === productId);
-      if (local) return local;
-      throw err;
-    }
+    const response = await apiClient.get(`/products/${productId}/`);
+    return response.data;
   },
 
   /**
-   * Register a new product
+   * Register a new product (Admin only)
    * @param {Object} productData - { id, name, description, model_version, category }
    */
   async createProduct(productData) {
-    // Standardize product ID to uppercase
     const standardized = {
       ...productData,
       id: productData.id ? productData.id.trim().toUpperCase() : `P-${Date.now()}`,
       model_version: productData.model_version || 'BIT-PLATE-CV-1.0',
-      status: 'Active',
-      created_at: new Date().toISOString()
+      status: 'Active'
     };
 
-    try {
-      const response = await apiClient.post('/products/', standardized);
-      saveLocalProduct(response.data || standardized);
-      return response.data || standardized;
-    } catch (err) {
-      console.warn('[inspectionService] Backend /products/ POST failed, saving to local catalog:', err?.message);
-      saveLocalProduct(standardized);
-      return standardized;
-    }
+    const response = await apiClient.post('/products/', standardized);
+    return response.data;
   },
 
   // ==========================================

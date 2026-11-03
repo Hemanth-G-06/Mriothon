@@ -65,9 +65,9 @@ frontend/.vite/
 coverage/
 
 # Generated Application Data & Local DBs
-*.sqlite3
-*.db
-backend/*.sqlite3
+# *.sqlite3
+# *.db
+# backend/*.sqlite3
 logs/
 *.log
 backend/logs/
@@ -82,10 +82,10 @@ chromadb/
 .chroma/
 vectorstore/
 *.chromadb
-data/
-data/*
-backend/data/
-backend/data/*
+# data/
+# data/*
+# backend/data/
+# backend/data/*
 backend/chroma/
 backend/chromadb/
 backend/.chroma/
@@ -104,6 +104,7 @@ tmp/
 temp/
 backend/tmp/
 backend/temp/
+Samples/
 
 # IDE & Operating System Files
 .idea/

@@ -20,7 +20,8 @@ import {
   Layers,
   Clock,
   ChevronRight,
-  Bot
+  Bot,
+  Scan
 } from 'lucide-react';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { formatDateTime } from '../../utils/formatters';

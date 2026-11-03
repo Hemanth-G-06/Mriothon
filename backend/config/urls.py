@@ -46,6 +46,11 @@ urlpatterns = [
     # Authentication & User Management
     path('api/', include('accounts.urls')),
 
+    # Quality Inspection & Products Catalog (Round 2)
+    path('api/products/', include('inspections.product_urls')),
+    path('api/inspections/', include('inspections.urls')),
+    path('api/supervisor/inspections/', include('inspections.supervisor_urls')),
+
     # Domain Applications
     path('api/machines/', include('machines.urls')),
     path('api/documents/', include('documents.urls')),
@@ -56,3 +61,8 @@ urlpatterns = [
     path('api/history/', include('history.urls')),
     path('api/supervisor/', include(('history.urls', 'supervisor'), namespace='supervisor')),
 ]
+
+# Serve media files in development
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+

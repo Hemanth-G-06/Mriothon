@@ -1,0 +1,42 @@
+{
+  "model_version": "BIT-PLATE-CV-1.0",
+  "total_samples": 60,
+  "successful_predictions": 60,
+  "failed_predictions": 0,
+  "confusion_matrix": {
+    "matrix": [
+      [
+        30,
+        0
+      ],
+      [
+        0,
+        30
+      ]
+    ],
+    "row_labels": [
+      "Actual Normal",
+      "Actual Defective"
+    ],
+    "col_labels": [
+      "Predicted Normal",
+      "Predicted Defective"
+    ]
+  },
+  "counts": {
+    "true_positives (TP)": 30,
+    "true_negatives (TN)": 30,
+    "false_positives (FP)": 0,
+    "false_negatives (FN)": 0
+  },
+  "metrics": {
+    "defect_recall": 1.0,
+    "defect_recall_percent": "100.00%",
+    "accuracy": 1.0,
+    "accuracy_percent": "100.00%",
+    "precision": 1.0,
+    "precision_percent": "100.00%",
+    "f1_score": 1.0
+  },
+  "limitations": "Evaluated on 60 synthetic procedural illustrations under fixed framing and lighting. No real factory photos or domain shifts were present. Scores are uncalibrated model outputs."
+}

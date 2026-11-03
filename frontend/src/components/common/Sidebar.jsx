@@ -1,27 +1,36 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
+  Users,
   Cpu,
   FileText,
   MessageSquare,
   History,
   X,
-  Wrench,
-  Shield,
   HardHat,
   Package,
   Scan,
   Layers,
-  ShieldCheck
+  ShieldCheck,
+  LogOut
 } from 'lucide-react';
 import { useAuth } from '../../hooks/useAuth';
 
 export default function Sidebar({ isOpen, onClose }) {
-  const { role } = useAuth();
+  const { role, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = async () => {
+    if (onClose) onClose();
+    await logout();
+    navigate('/login', { replace: true });
+  };
+
+  const normalizedRole = role ? role.toLowerCase() : '';
 
   const getNavLinks = () => {
-    switch (role) {
+    switch (normalizedRole) {
       case 'admin':
         return [
           { to: '/admin', label: 'Admin Overview', icon: LayoutDashboard },
@@ -84,7 +93,7 @@ export default function Sidebar({ isOpen, onClose }) {
         {/* Navigation links */}
         <div className="p-3 flex-grow-1 overflow-auto">
           <div className="text-uppercase text-secondary fw-bold px-2 mb-2" style={{ fontSize: '0.68rem', letterSpacing: '0.08em' }}>
-            {role ? `${role.toUpperCase()} PORTAL` : 'MENU'}
+            {normalizedRole ? `${normalizedRole.toUpperCase()} PORTAL` : 'MENU'}
           </div>
           <ul className="nav nav-pills flex-column gap-1">
             {navLinks.map((item) => {
@@ -93,7 +102,7 @@ export default function Sidebar({ isOpen, onClose }) {
                 <li className="nav-item" key={item.to}>
                   <NavLink
                     to={item.to}
-                    end={item.to === '/admin'}
+                    end={item.to === '/admin' || item.to === '/engineer' || item.to === '/supervisor'}
                     onClick={() => {
                       if (window.innerWidth < 992) onClose();
                     }}
@@ -120,10 +129,19 @@ export default function Sidebar({ isOpen, onClose }) {
 
         {/* Sidebar Footer */}
         <div className="p-3 border-top border-secondary border-opacity-25 bg-black bg-opacity-20 text-secondary small">
-          <div className="d-flex align-items-center gap-2">
+          <div className="d-flex align-items-center justify-content-between mb-2">
             <span className="badge bg-secondary text-white" style={{ fontSize: '0.65rem' }}>v1.0.0</span>
-            <span style={{ fontSize: '0.75rem' }}>Gemini RAG Architecture</span>
+            <span style={{ fontSize: '0.72rem' }}>Gemini RAG Architecture</span>
           </div>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="btn btn-sm btn-outline-danger w-100 d-flex align-items-center justify-content-center gap-2"
+            style={{ fontSize: '0.8rem' }}
+          >
+            <LogOut size={14} />
+            <span>Sign Out</span>
+          </button>
         </div>
       </aside>
     </>
